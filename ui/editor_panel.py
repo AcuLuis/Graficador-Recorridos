@@ -149,12 +149,14 @@ class PanelVista(QWidget):
             return
 
         if self.lienzo.graph.number_of_nodes() > 0:
-            if not self.lienzo.alertaConfirmacion('Se borrará tu avance. \n ¿Estás seguro de cambiar el tipo de grafo?'):
+            if not self.lienzo.alertaConfirmacion(
+                'Se borrará el grafo actual (puedes recuperarlo con Ctrl+Z).\n'
+                '¿Estás seguro de cambiar el tipo de grafo?'
+            ):
                 self.syncTipoGrafo(self.lienzo.model.graph_type)
                 return
-            self.lienzo.Limpiar()
 
-        self.lienzo.setTipoGrafo(tipo)
+        self.lienzo.cambiarTipoGrafo(tipo)
 
     def syncTipoGrafo(self, tipo):
         """Marca el radio que corresponde a 'tipo' sin disparar setTipoGrafo."""
@@ -192,6 +194,11 @@ class PanelVista(QWidget):
     def buildGraphSummaryText(self):
         return self.parent().buildGraphSummaryText()
 
+    def clearAlgorithmResult(self):
+        parent = self.parent()
+        if parent is not None and hasattr(parent, 'clearAlgorithmResult'):
+            parent.clearAlgorithmResult()
+
     def PideNodos(self):
         dialogo = DialogoArista(self)
         if dialogo.exec() == QDialog.DialogCode.Accepted:
@@ -202,7 +209,6 @@ class PanelVista(QWidget):
                 self.lienzo.Alertas("Ingresar valores correctos")
 
     def LimpiarLienzo(self):
-        self.lblTipo.setText("")
         self.lienzo.Limpiar()
 
     def focusComponent(self):

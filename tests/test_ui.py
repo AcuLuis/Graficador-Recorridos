@@ -177,6 +177,103 @@ class TipoGrafoTests(UiTestCase):
         self.assertEqual(self.lienzo.model.graph_type, "Directed")
 
 
+class HistorialTests(UiTestCase):
+    def test_deshacer_y_rehacer_eliminar_nodo(self):
+        self.lienzo.eliminarNodo(1)
+        self.assertNotIn(1, self.lienzo.graph)
+
+        self.lienzo.Deshacer()
+        self.assertIn(1, self.lienzo.graph)
+        self.assertEqual(self.lienzo.graph[1][2]["weight"], 10)
+
+        self.lienzo.Rehacer()
+        self.assertNotIn(1, self.lienzo.graph)
+
+    def test_deshacer_reemplazo_de_peso_restaura_peso(self):
+        self.lienzo.DibujarArista(1, 2, 99)
+        self.assertEqual(self.lienzo.graph[1][2]["weight"], 99)
+
+        self.lienzo.Deshacer()
+
+        self.assertTrue(self.lienzo.graph.has_edge(1, 2))
+        self.assertEqual(self.lienzo.graph[1][2]["weight"], 10)
+
+    def test_deshacer_limpiar(self):
+        self.lienzo.Limpiar()
+        self.lienzo.Deshacer()
+
+        self.assertEqual(self.lienzo.graph.number_of_nodes(), 8)
+
+    def test_deshacer_arrastre(self):
+        original = self.lienzo.pos[1]
+        self.clic_en_nodo(1)
+        self.lienzo.MouseMove(evento(0.9, 0.9))
+        self.lienzo.MouseRelease(evento(0.9, 0.9))
+        self.assertEqual(self.lienzo.pos[1], (0.9, 0.9))
+
+        self.lienzo.Deshacer()
+
+        self.assertEqual(self.lienzo.pos[1], original)
+
+    def test_clic_sin_mover_no_registra_historial(self):
+        self.clic_en_nodo(1)
+        self.lienzo.MouseRelease(evento(0, 0))
+
+        self.assertFalse(self.lienzo.history.can_undo)
+
+    def test_deshacer_cambio_de_tipo_restaura_radio(self):
+        self.panel.rbDirigido.click()
+        self.lienzo.Deshacer()
+
+        self.assertEqual(self.lienzo.model.graph_type, "Undirected")
+        self.assertTrue(self.panel.rbNoDirigido.isChecked())
+        self.assertEqual(self.lienzo.graph.number_of_nodes(), 8)
+
+    def test_eliminar_seleccion_es_un_solo_paso(self):
+        self.clic_en_nodo(2, key="control")
+        self.clic_en_nodo(3, key="control")
+        self.window.handleSelectionDelete()
+
+        self.lienzo.Deshacer()
+
+        self.assertIn(2, self.lienzo.graph)
+        self.assertIn(3, self.lienzo.graph)
+        self.assertFalse(self.lienzo.history.can_undo)
+
+    def test_acciones_de_menu_reflejan_historial(self):
+        self.assertFalse(self.window.actDeshacer.isEnabled())
+
+        self.lienzo.eliminarNodo(1)
+
+        self.assertTrue(self.window.actDeshacer.isEnabled())
+        self.assertFalse(self.window.actRehacer.isEnabled())
+
+
+class ValidacionAristasTests(UiTestCase):
+    def test_rechaza_lazo(self):
+        self.lienzo.DibujarArista(1, 1, 3)
+
+        self.assertFalse(self.lienzo.graph.has_edge(1, 1))
+        self.assertTrue(self.alertas)
+
+    def test_no_reemplaza_si_se_cancela(self):
+        self.confirmar = False
+        self.lienzo.DibujarArista(1, 2, 99)
+
+        self.assertEqual(self.lienzo.graph[1][2]["weight"], 10)
+        self.assertFalse(self.lienzo.history.can_undo)
+
+    def test_editar_grafo_descarta_resultado_de_algoritmo(self):
+        self.window.solicitarInicio = lambda: 1
+        self.window.ejecutarBFS()
+        self.assertTrue(self.lienzo.edge_colors)
+
+        self.lienzo.eliminarArista(1, 2)
+
+        self.assertEqual(self.lienzo.edge_colors, {})
+        self.assertEqual(self.panel.lblTipo.text(), "")
+
+
 class AlgoritmosUiTests(UiTestCase):
     def test_dfs_desde_menu(self):
         self.window.solicitarInicio = lambda: 1

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import networkx as nx
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction, QKeySequence, QShortcut
+from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import QDialog, QDockWidget, QFileDialog, QMainWindow, QMessageBox
 
 from core.algorithms import AlgorithmsService
@@ -35,7 +35,6 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.dock_widget)
 
         self.setupMenuBar()
-        self.setupShortcuts()
         self.panel.btnEditarSeleccion.clicked.connect(self.handleSelectionEdit)
         self.panel.btnEliminarSeleccion.clicked.connect(self.handleSelectionDelete)
         self.panel.btnLimpiarAnalisis.clicked.connect(self.clearAnalysisState)
@@ -71,6 +70,26 @@ class MainWindow(QMainWindow):
         menuArchivo.addAction(btnGuardarImagen)
         menuArchivo.addAction(btnGuardarResumen)
 
+        # Editar
+        menuEditar = menubar.addMenu("&Editar")
+
+        self.actDeshacer = QAction('Deshacer', self)
+        self.actDeshacer.setShortcut(QKeySequence.StandardKey.Undo)
+        self.actDeshacer.triggered.connect(self.lienzo.Deshacer)
+        menuEditar.addAction(self.actDeshacer)
+
+        self.actRehacer = QAction('Rehacer', self)
+        self.actRehacer.setShortcuts([QKeySequence("Ctrl+Y"), QKeySequence("Ctrl+Shift+Z")])
+        self.actRehacer.triggered.connect(self.lienzo.Rehacer)
+        menuEditar.addAction(self.actRehacer)
+
+        menuEditar.addSeparator()
+
+        actEliminarSeleccion = QAction('Eliminar selección', self)
+        actEliminarSeleccion.setShortcut(QKeySequence.StandardKey.Delete)
+        actEliminarSeleccion.triggered.connect(self.handleSelectionDelete)
+        menuEditar.addAction(actEliminarSeleccion)
+
         # Grafos
         menuGrafos = menubar.addMenu("&Grafos")
 
@@ -104,9 +123,6 @@ class MainWindow(QMainWindow):
         btnDIJS = QAction('Dijkstra - Camino más corto', self)
         btnDIJS.triggered.connect(self.ejecutarDijkstra)
         menuAlgoritmos.addAction(btnDIJS)
-
-    def setupShortcuts(self):
-        QShortcut(QKeySequence("Ctrl+Z"), self).activated.connect(self.lienzo.Deshacer)
 
     def dibujaPruebaGrafo(self):
         if self.lienzo.cargarJson(str(DATOS_PRUEBA)):
@@ -247,6 +263,12 @@ class MainWindow(QMainWindow):
             f"Aristas visibles: {visible_graph.number_of_edges()}"
         )
         self.panel.setStats("\n".join(["Resumen del grafo:"] + format_stats(lienzo.graph)))
+        self.actDeshacer.setEnabled(lienzo.history.can_undo)
+        self.actRehacer.setEnabled(lienzo.history.can_redo)
+
+    def clearAlgorithmResult(self):
+        self.panel.clearContent()
+        self.centralWidget.setNombreAlgoritmo("")
 
     # ── Selección ──────────────────────────────────────────────
 
@@ -348,20 +370,4 @@ class MainWindow(QMainWindow):
             self.lienzo.moverNodo(selected_node, dialog.posicion)
 
     def handleSelectionDelete(self):
-        lienzo = self.lienzo
-        nodes = set(lienzo.selected_nodes)
-        if lienzo.selected_node is not None:
-            nodes.add(lienzo.selected_node)
-        edges = set(lienzo.selected_edges)
-        if lienzo.selected_edge is not None:
-            edges.add(lienzo.selected_edge)
-
-        for u, v in edges:
-            if lienzo.graph.has_edge(u, v):
-                lienzo.model.eliminar_arista(u, v)
-        for node in nodes:
-            if node in lienzo.graph:
-                lienzo.model.eliminar_nodo(node)
-
-        lienzo.clearSelection()
-        lienzo._refresh_after_change()
+        self.lienzo.eliminarSeleccion()

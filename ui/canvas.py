@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import QFileDialog, QMessageBox
 
 from core.graph_model import GraphModel
 from core.graph_service import GraphService
+from core.history import History
 
 COLOR_ARISTA = '#2c3e50'
 PALETA_COMPONENTES = ['#3498db', '#2ecc71', '#9b59b6', '#f39c12', '#e74c3c', '#1abc9c', '#34495e', '#e84393']
@@ -28,7 +29,9 @@ class Lienzo:
         self.pan_origin = None
         self.pan_start_px = None
         self.visual_filter = 'all'
-        self.historial = []
+        self.history = History()
+        # Estado previo al arrastre; se registra solo si el nodo realmente se mueve.
+        self._drag_snapshot = None
 
         # Figure (no pyplot): evita el estado global de pyplot dentro de Qt.
         self.fig = Figure(figsize=(8.5, 5.8))
@@ -77,10 +80,44 @@ class Lienzo:
     def current_ylim(self, limits):
         self.ax.set_ylim(*limits)
 
-    def setTipoGrafo(self, tipo):
+    def cambiarTipoGrafo(self, tipo):
+        """Empieza un grafo vacío del tipo indicado (se puede deshacer)."""
+        self._checkpoint()
+        self.model.clear()
         self.model.set_graph_type(tipo)
-        self.historial.clear()
+        self.clearSelection()
+        self.component_nodes = set()
+        self._refresh_after_change()
+
+    # ── Historial ──────────────────────────────────────────────
+
+    def _checkpoint(self, invalida_resultado=True):
+        """Registra el estado actual antes de modificar el grafo.
+
+        Si la modificación cambia la estructura, el resultado del último
+        algoritmo deja de corresponder al grafo y se descarta.
+        """
+        self.history.push(self.model.to_dict())
+        if invalida_resultado:
+            self._descartarResultado()
+
+    def _descartarResultado(self):
+        self.model.edge_colors.clear()
         self.clearAnalysisHighlights()
+        self.main_window.clearAlgorithmResult()
+
+    def Deshacer(self):
+        self._restaurar(self.history.undo(self.model.to_dict()))
+
+    def Rehacer(self):
+        self._restaurar(self.history.redo(self.model.to_dict()))
+
+    def _restaurar(self, snapshot):
+        if snapshot is None:
+            return
+        self.model.load_from_dict(snapshot)
+        self._descartarResultado()
+        self.main_window.syncTipoGrafo(self.model.graph_type)
         self._refresh_after_change()
 
     def clearSelection(self):
@@ -110,18 +147,28 @@ class Lienzo:
         self.main_window.updateSelectionInfo(self.selected_node, self.selected_edge)
 
     def DibujarArista(self, posNodo1, posNodo2, peso=1):
-        if posNodo1 in self.graph.nodes() and posNodo2 in self.graph.nodes():
-            self.model.add_edge(posNodo1, posNodo2, peso=peso)
-            self.historial.append(('arista', (posNodo1, posNodo2)))
-            self.DibujarGrafo()
-            self.main_window.updateGraphStats()
-        else:
-            msg = "Los nodos no se encuentran."
-            if posNodo1 not in self.graph.nodes():
-                msg = f"El nodo {posNodo1} no se encuentra."
-            elif posNodo2 not in self.graph.nodes():
-                msg = f"El nodo {posNodo2} no se encuentra."
-            self.Alertas(msg)
+        for nodo in (posNodo1, posNodo2):
+            if nodo not in self.graph:
+                self.Alertas(f"El nodo {nodo} no se encuentra.")
+                return
+
+        if posNodo1 == posNodo2:
+            self.Alertas("Una arista debe unir dos nodos distintos.", titulo="Arista no válida")
+            return
+
+        if self.graph.has_edge(posNodo1, posNodo2):
+            peso_actual = self.graph.edges[posNodo1, posNodo2].get('weight', 1)
+            if peso_actual == peso:
+                return
+            if not self.alertaConfirmacion(
+                f"La arista {posNodo1} - {posNodo2} ya existe con peso {peso_actual}.\n"
+                f"¿Reemplazar su peso por {peso}?"
+            ):
+                return
+
+        self._checkpoint()
+        self.model.add_edge(posNodo1, posNodo2, peso=peso)
+        self._refresh_after_change()
 
     def Alertas(self, mensaje, titulo="Elemento no encontrado"):
         alerta = QMessageBox()
@@ -165,11 +212,10 @@ class Lienzo:
 
         if self.main_window.dibNodoIsSelected():
             node_id = 1 if len(self.graph.nodes()) == 0 else max(self.graph.nodes()) + 1
+            self._checkpoint()
             self.model.add_node(node_id, (event.xdata, event.ydata))
-            self.historial.append(('nodo', node_id))
             self.clearSelection()
-            self.DibujarGrafo()
-            self.main_window.updateGraphStats()
+            self._refresh_after_change()
             return
 
         clicked_node = self._find_node_at_position(event.xdata, event.ydata)
@@ -192,6 +238,7 @@ class Lienzo:
             self.selected_edge = None
             self.dragging_node = clicked_node
             self.drag_start = (event.xdata, event.ydata)
+            self._drag_snapshot = self.model.to_dict()
             self.DibujarGrafo()
             self.main_window.updateSelectionInfo(self.selected_node, self.selected_edge)
             return
@@ -270,10 +317,19 @@ class Lienzo:
         if event.xdata is None or event.ydata is None or self.dragging_node is None:
             return
 
+        if self._drag_snapshot is not None:
+            # Primer movimiento real del arrastre: mover no invalida resultados.
+            self.history.push(self._drag_snapshot)
+            self._drag_snapshot = None
+
         self.model.set_node_position(self.dragging_node, (event.xdata, event.ydata))
         self.DibujarGrafo()
 
     def MouseRelease(self, event):
+        if self.dragging_node is not None and self._drag_snapshot is None:
+            # Hubo arrastre: la posición mostrada en el panel cambió.
+            self.main_window.updateSelectionInfo(self.selected_node, self.selected_edge)
+        self._drag_snapshot = None
         self.dragging_node = None
         self.drag_start = None
         self.is_panning = False
@@ -508,8 +564,8 @@ class Lienzo:
             return False
 
         self.model = loaded_model
-        self.historial.clear()
-        self.clearAnalysisHighlights()
+        self.history.clear()
+        self._descartarResultado()
         self.clearSelection()
         self.main_window.syncTipoGrafo(self.model.graph_type)
         self._refresh_after_change()
@@ -527,58 +583,66 @@ class Lienzo:
         self.DibujarGrafo()
         self.main_window.updateGraphStats()
 
-    def Deshacer(self):
-        if not self.historial:
-            return
-
-        tipo, dato = self.historial.pop()
-
-        if tipo == 'nodo':
-            try:
-                self.model.eliminar_nodo(dato)
-            except ValueError:
-                pass
-        elif tipo == 'arista':
-            u, v = dato
-            try:
-                self.model.eliminar_arista(u, v)
-            except ValueError:
-                pass
-
-        self._refresh_after_change()
-
     def Limpiar(self):
+        if self.graph.number_of_nodes() == 0:
+            return
+        self._checkpoint()
         self.model.clear()
-        self.historial.clear()
-        self.clearAnalysisHighlights()
         self.clearSelection()
         self.component_nodes = set()
         self._refresh_after_change()
 
     def eliminarNodo(self, node_id):
-        try:
-            self.model.eliminar_nodo(node_id)
-        except ValueError as exc:
-            self.Alertas(str(exc))
+        if node_id not in self.graph:
+            self.Alertas(f"El nodo {node_id} no existe.")
             return
+        self._checkpoint()
+        self.model.eliminar_nodo(node_id)
         self._refresh_after_change()
 
     def eliminarArista(self, node1, node2):
-        try:
-            self.model.eliminar_arista(node1, node2)
-        except ValueError as exc:
-            self.Alertas(str(exc))
+        if not self.graph.has_edge(node1, node2):
+            self.Alertas(f"La arista {node1} - {node2} no existe.")
             return
+        self._checkpoint()
+        self.model.eliminar_arista(node1, node2)
+        self._refresh_after_change()
+
+    def eliminarSeleccion(self):
+        """Elimina, en un solo paso deshacible, todo lo seleccionado."""
+        nodes = set(self.selected_nodes)
+        if self.selected_node is not None:
+            nodes.add(self.selected_node)
+        edges = set(self.selected_edges)
+        if self.selected_edge is not None:
+            edges.add(self.selected_edge)
+
+        nodes = {node for node in nodes if node in self.graph}
+        edges = {edge for edge in edges if self.graph.has_edge(*edge)}
+        if not nodes and not edges:
+            return
+
+        self._checkpoint()
+        for u, v in edges:
+            if self.graph.has_edge(u, v):
+                self.model.eliminar_arista(u, v)
+        for node in nodes:
+            self.model.eliminar_nodo(node)
+
+        self.clearSelection()
         self._refresh_after_change()
 
     def actualizarPesoArista(self, node1, node2, nuevo_peso):
-        try:
-            self.model.update_edge_weight(node1, node2, nuevo_peso)
-        except ValueError as exc:
-            self.Alertas(str(exc))
+        if not self.graph.has_edge(node1, node2):
+            self.Alertas(f"La arista {node1} - {node2} no existe.")
             return
+        if self.graph.edges[node1, node2].get('weight', 1) == nuevo_peso:
+            return
+        self._checkpoint()
+        self.model.update_edge_weight(node1, node2, nuevo_peso)
         self._refresh_after_change()
 
     def moverNodo(self, node_id, posicion):
+        self._checkpoint(invalida_resultado=False)
         self.model.set_node_position(node_id, posicion)
         self._refresh_after_change()
