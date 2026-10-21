@@ -1,6 +1,6 @@
 import unittest
 
-from graph_model import GraphModel
+from core.graph_model import GraphModel
 
 
 class GraphModelTests(unittest.TestCase):

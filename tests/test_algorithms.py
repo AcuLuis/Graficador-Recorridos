@@ -2,7 +2,7 @@ import unittest
 
 import networkx as nx
 
-from algorithms_service import AlgorithmsService
+from core.algorithms import AlgorithmsService
 
 
 def grafo_cadena():

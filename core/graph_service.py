@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from graph_model import GraphModel
+from core.graph_model import GraphModel
 
 
 class GraphService:

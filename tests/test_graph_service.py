@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from graph_service import GraphService
+from core.graph_service import GraphService
 
 RAIZ = Path(__file__).resolve().parent.parent
 
