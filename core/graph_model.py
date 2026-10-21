@@ -119,15 +119,14 @@ class GraphModel:
             self.edge_weights.pop((node2, node1), None)
 
     def to_dict(self) -> dict[str, Any]:
+        """Estructura del grafo (sin estado visual como los colores de un algoritmo)."""
         return {
             "nodes": list(self.graph.nodes()),
             "edges": [
                 [u, v, dict(data)]
                 for u, v, data in self.graph.edges(data=True)
             ],
-            "pos": {str(k): v for k, v in self.pos.items()},
-            "edge_colors": {str(k): v for k, v in self.edge_colors.items()},
-            "edge_weights": {str(k): v for k, v in self.edge_weights.items()},
+            "pos": {str(k): list(v) for k, v in self.pos.items()},
             "graph_type": self.graph_type,
         }
 

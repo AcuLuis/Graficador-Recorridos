@@ -1,4 +1,5 @@
 """Pruebas de la interfaz sin ventana visible (Qt en modo offscreen)."""
+import json
 import os
 import sys
 import tempfile
@@ -9,8 +10,10 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication, QDialog, QFileDialog
+from PyQt6.QtGui import QCloseEvent
+from PyQt6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox
 
+from core.graph_service import GraphService
 from ui.dialogs import DialogoArista
 from ui.main_window import MainWindow
 
@@ -41,6 +44,9 @@ class UiTestCase(unittest.TestCase):
         self.confirmar = True
         self.lienzo.Alertas = lambda msg, titulo="": self.alertas.append(msg)
         self.lienzo.alertaConfirmacion = lambda msg: self.confirmar
+        # Por defecto se descartan cambios pendientes sin preguntar (los tests
+        # de PersistenciaTests usan el método real).
+        self.window.confirmarCambiosPendientes = lambda: True
 
         self.window.dibujaPruebaGrafo()
         self.modo_seleccion()
@@ -285,6 +291,101 @@ class AlgoritmosUiTests(UiTestCase):
         self.window.ejecutarCentralidad()
 
         self.assertEqual(len(self.lienzo.analysis_highlighted_nodes), 5)
+
+
+class PersistenciaTests(UiTestCase):
+    def setUp(self):
+        super().setUp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.destino = str(Path(self.tmp.name) / "mi_grafo.json")
+
+    def confirmar_real(self, boton):
+        with mock.patch.object(QMessageBox, "question", return_value=boton):
+            return MainWindow.confirmarCambiosPendientes(self.window)
+
+    def guardar_como(self, destino):
+        with mock.patch.object(QFileDialog, "getSaveFileName", return_value=(destino, "")):
+            return self.window.guardarGrafo()
+
+    def test_grafo_de_prueba_no_queda_asociado_a_su_archivo(self):
+        self.assertIsNone(self.lienzo.ruta_actual)
+        self.assertFalse(self.lienzo.hay_cambios)
+        self.assertIn("datos_prueba", self.window.windowTitle())
+
+    def test_guardar_sin_ruta_pide_destino_y_lo_recuerda(self):
+        self.assertTrue(self.guardar_como(self.destino))
+
+        self.assertEqual(self.lienzo.ruta_actual, self.destino)
+        self.assertFalse(self.window.isWindowModified())
+        self.assertIn("mi_grafo.json", self.window.windowTitle())
+
+        self.lienzo.eliminarNodo(1)
+        with mock.patch.object(QFileDialog, "getSaveFileName") as dialogo:
+            self.window.guardarGrafo()
+        dialogo.assert_not_called()
+        self.assertNotIn(1, GraphService.load_json(self.destino).graph)
+
+    def test_guardar_como_agrega_extension(self):
+        self.guardar_como(str(Path(self.tmp.name) / "sin_extension"))
+
+        self.assertTrue(self.lienzo.ruta_actual.endswith("sin_extension.json"))
+
+    def test_edicion_marca_cambios_y_deshacer_los_quita(self):
+        self.lienzo.eliminarNodo(1)
+        self.assertTrue(self.window.isWindowModified())
+
+        self.lienzo.Deshacer()
+        self.assertFalse(self.window.isWindowModified())
+
+    def test_json_guardado_no_incluye_colores_de_algoritmo(self):
+        self.window.solicitarInicio = lambda: 1
+        self.window.ejecutarBFS()
+        self.assertFalse(self.lienzo.hay_cambios)
+
+        self.guardar_como(self.destino)
+
+        datos = json.loads(Path(self.destino).read_text(encoding="utf-8"))
+        self.assertNotIn("edge_colors", datos)
+
+    def test_confirmar_sin_cambios_no_pregunta(self):
+        with mock.patch.object(QMessageBox, "question") as pregunta:
+            self.assertTrue(MainWindow.confirmarCambiosPendientes(self.window))
+        pregunta.assert_not_called()
+
+    def test_confirmar_cancelar_detiene_la_accion(self):
+        self.lienzo.eliminarNodo(1)
+
+        self.assertFalse(self.confirmar_real(QMessageBox.StandardButton.Cancel))
+
+    def test_confirmar_descartar_permite_continuar(self):
+        self.lienzo.eliminarNodo(1)
+
+        self.assertTrue(self.confirmar_real(QMessageBox.StandardButton.Discard))
+
+    def test_confirmar_guardar_guarda(self):
+        self.lienzo.eliminarNodo(1)
+        with mock.patch.object(QFileDialog, "getSaveFileName", return_value=(self.destino, "")):
+            self.assertTrue(self.confirmar_real(QMessageBox.StandardButton.Save))
+
+        self.assertTrue(Path(self.destino).exists())
+        self.assertFalse(self.lienzo.hay_cambios)
+
+    def test_cerrar_con_cambios_y_cancelar_no_cierra(self):
+        self.window.confirmarCambiosPendientes = lambda: False
+        evento_cierre = QCloseEvent()
+
+        self.window.closeEvent(evento_cierre)
+
+        self.assertFalse(evento_cierre.isAccepted())
+        self.window.confirmarCambiosPendientes = lambda: True
+
+    def test_nuevo_grafo(self):
+        self.window.nuevoGrafo()
+
+        self.assertEqual(self.lienzo.graph.number_of_nodes(), 0)
+        self.assertIn("Sin título", self.window.windowTitle())
+        self.assertFalse(self.lienzo.history.can_undo)
 
 
 class ExportarTests(UiTestCase):

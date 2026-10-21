@@ -1,4 +1,5 @@
 import math
+from pathlib import Path
 
 import networkx as nx
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -32,6 +33,11 @@ class Lienzo:
         self.history = History()
         # Estado previo al arrastre; se registra solo si el nodo realmente se mueve.
         self._drag_snapshot = None
+
+        # Documento: archivo asociado y estado guardado (para detectar cambios).
+        self.ruta_actual = None
+        self._nombre_sin_ruta = "Sin título"
+        self._snapshot_guardado = self.model.to_dict()
 
         # Figure (no pyplot): evita el estado global de pyplot dentro de Qt.
         self.fig = Figure(figsize=(8.5, 5.8))
@@ -326,10 +332,12 @@ class Lienzo:
         self.DibujarGrafo()
 
     def MouseRelease(self, event):
-        if self.dragging_node is not None and self._drag_snapshot is None:
-            # Hubo arrastre: la posición mostrada en el panel cambió.
-            self.main_window.updateSelectionInfo(self.selected_node, self.selected_edge)
+        hubo_arrastre = self.dragging_node is not None and self._drag_snapshot is None
         self._drag_snapshot = None
+        if hubo_arrastre:
+            # La posición del panel y el estado de "cambios sin guardar" cambiaron.
+            self.dragging_node = None
+            self._refresh_after_change()
         self.dragging_node = None
         self.drag_start = None
         self.is_panning = False
@@ -541,19 +549,40 @@ class Lienzo:
                 title.remove()
                 summary_text.remove()
 
-    def guardarEnJSON(self):
-        ruta, _ = QFileDialog.getSaveFileName(self.main_window, 'Guardar Grafo', '', 'JSON Files (*.json);;All Files (*)')
-        if ruta:
-            GraphService.save_json(self.model, ruta)
+    # ── Documento ──────────────────────────────────────────────
 
-    def cargarJson(self, ruta_archivo=None):
-        ruta = ruta_archivo
-        if not ruta:
-            ruta, _ = QFileDialog.getOpenFileName(self.main_window, 'Cargar Grafo', '', 'JSON Files (*.json);;All Files (*)')
+    @property
+    def hay_cambios(self):
+        return self.model.to_dict() != self._snapshot_guardado
 
-        if not ruta:
-            return False
+    @property
+    def nombre_documento(self):
+        return Path(self.ruta_actual).name if self.ruta_actual else self._nombre_sin_ruta
 
+    def _marcarGuardado(self, ruta, nombre_sin_ruta="Sin título"):
+        self.ruta_actual = ruta
+        self._nombre_sin_ruta = nombre_sin_ruta
+        self._snapshot_guardado = self.model.to_dict()
+
+    def guardarEnJSON(self, ruta):
+        """Guarda el grafo en 'ruta'. Propaga OSError para que la ventana lo informe."""
+        GraphService.save_json(self.model, ruta)
+        self._marcarGuardado(str(ruta))
+        self.main_window.updateGraphStats()
+
+    def nuevoGrafo(self):
+        self.model = GraphModel(self.model.graph_type)
+        self.history.clear()
+        self._descartarResultado()
+        self.clearSelection()
+        self.component_nodes = set()
+        self.visual_filter = 'all'
+        self._marcarGuardado(None)
+        self._refresh_after_change()
+
+    def cargarJson(self, ruta, como_plantilla=False):
+        """Carga un grafo. Con 'como_plantilla' no se asocia el archivo
+        (guardar pedirá una ruta nueva en lugar de sobrescribirlo)."""
         try:
             loaded_model = GraphService.load_json(ruta)
         except FileNotFoundError:
@@ -567,6 +596,10 @@ class Lienzo:
         self.history.clear()
         self._descartarResultado()
         self.clearSelection()
+        if como_plantilla:
+            self._marcarGuardado(None, nombre_sin_ruta=Path(ruta).stem)
+        else:
+            self._marcarGuardado(str(ruta))
         self.main_window.syncTipoGrafo(self.model.graph_type)
         self._refresh_after_change()
         return True

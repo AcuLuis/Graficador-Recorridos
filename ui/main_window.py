@@ -19,7 +19,6 @@ COLOR_RESULTADO = "blue"
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VISUALIZADOR DE GRAFOS - ADA")
         self.setMinimumSize(800, 600)
         self.setStyleSheet(APP_STYLESHEET)
 
@@ -50,25 +49,43 @@ class MainWindow(QMainWindow):
         # Archivo
         menuArchivo = menubar.addMenu("&Archivo")
 
-        btnGuardarImagen = QAction('Guardar Imagen', self)
+        btnNuevo = QAction('Nuevo Grafo', self)
+        btnNuevo.setShortcut(QKeySequence.StandardKey.New)
+        btnNuevo.triggered.connect(self.nuevoGrafo)
+
+        btnCargarJson = QAction('Abrir Grafo...', self)
+        btnCargarJson.setShortcut(QKeySequence.StandardKey.Open)
+        btnCargarJson.triggered.connect(self.abrirGrafo)
+
+        btnGuardarJson = QAction('Guardar Grafo', self)
+        btnGuardarJson.setShortcut(QKeySequence.StandardKey.Save)
+        btnGuardarJson.triggered.connect(self.guardarGrafo)
+
+        btnGuardarComo = QAction('Guardar Grafo como...', self)
+        btnGuardarComo.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        btnGuardarComo.triggered.connect(self.guardarGrafoComo)
+
+        btnGuardarImagen = QAction('Exportar Imagen...', self)
         btnGuardarImagen.setShortcut('Ctrl+I')
         btnGuardarImagen.triggered.connect(self.lienzo.GuardarIMG)
 
-        btnGuardarResumen = QAction('Guardar Resumen', self)
+        btnGuardarResumen = QAction('Exportar Resumen...', self)
         btnGuardarResumen.triggered.connect(self.guardarResumen)
 
-        btnGuardarJson = QAction('Guardar Grafo', self)
-        btnGuardarJson.setShortcut('Ctrl+S')
-        btnGuardarJson.triggered.connect(self.lienzo.guardarEnJSON)
+        btnSalir = QAction('Salir', self)
+        btnSalir.setShortcut(QKeySequence("Ctrl+Q"))
+        btnSalir.triggered.connect(self.close)
 
-        btnCargarJson = QAction('Cargar Grafo', self)
-        btnCargarJson.setShortcut('Ctrl+O')
-        btnCargarJson.triggered.connect(lambda: self.lienzo.cargarJson())
-
+        menuArchivo.addAction(btnNuevo)
         menuArchivo.addAction(btnCargarJson)
+        menuArchivo.addSeparator()
         menuArchivo.addAction(btnGuardarJson)
+        menuArchivo.addAction(btnGuardarComo)
+        menuArchivo.addSeparator()
         menuArchivo.addAction(btnGuardarImagen)
         menuArchivo.addAction(btnGuardarResumen)
+        menuArchivo.addSeparator()
+        menuArchivo.addAction(btnSalir)
 
         # Editar
         menuEditar = menubar.addMenu("&Editar")
@@ -124,9 +141,75 @@ class MainWindow(QMainWindow):
         btnDIJS.triggered.connect(self.ejecutarDijkstra)
         menuAlgoritmos.addAction(btnDIJS)
 
+    # ── Archivo ────────────────────────────────────────────────
+
+    def nuevoGrafo(self):
+        if self.confirmarCambiosPendientes():
+            self.lienzo.nuevoGrafo()
+
+    def abrirGrafo(self):
+        if not self.confirmarCambiosPendientes():
+            return
+        ruta, _ = QFileDialog.getOpenFileName(self, 'Abrir Grafo', '', 'JSON Files (*.json);;All Files (*)')
+        if ruta:
+            self.lienzo.cargarJson(ruta)
+
     def dibujaPruebaGrafo(self):
-        if self.lienzo.cargarJson(str(DATOS_PRUEBA)):
+        if not self.confirmarCambiosPendientes():
+            return
+        if self.lienzo.cargarJson(str(DATOS_PRUEBA), como_plantilla=True):
             self.centralWidget.setNombreAlgoritmo("Grafo de Prueba")
+
+    def guardarGrafo(self):
+        """Guarda en el archivo actual; si no hay, pide uno. Devuelve True si se guardó."""
+        if self.lienzo.ruta_actual is None:
+            return self.guardarGrafoComo()
+        return self._guardarEn(self.lienzo.ruta_actual)
+
+    def guardarGrafoComo(self):
+        sugerido = self.lienzo.ruta_actual or f"{self.lienzo.nombre_documento}.json"
+        ruta, _ = QFileDialog.getSaveFileName(self, 'Guardar Grafo como', sugerido, 'JSON Files (*.json);;All Files (*)')
+        if not ruta:
+            return False
+        if not Path(ruta).suffix:
+            ruta += ".json"
+        return self._guardarEn(ruta)
+
+    def _guardarEn(self, ruta):
+        try:
+            self.lienzo.guardarEnJSON(ruta)
+        except OSError as exc:
+            QMessageBox.warning(self, "Error al guardar", f"No se pudo guardar el grafo:\n{exc}")
+            return False
+        return True
+
+    def confirmarCambiosPendientes(self):
+        """Si hay cambios sin guardar, pregunta qué hacer. Devuelve True si se puede continuar."""
+        if not self.lienzo.hay_cambios:
+            return True
+
+        respuesta = QMessageBox.question(
+            self,
+            "Cambios sin guardar",
+            f"El grafo \"{self.lienzo.nombre_documento}\" tiene cambios sin guardar.\n¿Deseas guardarlos?",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )
+        if respuesta == QMessageBox.StandardButton.Save:
+            return self.guardarGrafo()
+        return respuesta == QMessageBox.StandardButton.Discard
+
+    def closeEvent(self, event):
+        if self.confirmarCambiosPendientes():
+            event.accept()
+        else:
+            event.ignore()
+
+    def _actualizarTitulo(self):
+        self.setWindowTitle(f"{self.lienzo.nombre_documento}[*] - VISUALIZADOR DE GRAFOS - ADA")
+        self.setWindowModified(self.lienzo.hay_cambios)
 
     # ── Algoritmos ──────────────────────────────────────────────
 
@@ -265,6 +348,7 @@ class MainWindow(QMainWindow):
         self.panel.setStats("\n".join(["Resumen del grafo:"] + format_stats(lienzo.graph)))
         self.actDeshacer.setEnabled(lienzo.history.can_undo)
         self.actRehacer.setEnabled(lienzo.history.can_redo)
+        self._actualizarTitulo()
 
     def clearAlgorithmResult(self):
         self.panel.clearContent()
