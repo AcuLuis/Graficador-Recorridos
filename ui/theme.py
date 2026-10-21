@@ -28,6 +28,38 @@ BORDE_ETIQUETA = '#cbd5e1'
 TEXTO_CLARO = '#ffffff'
 TEXTO_OSCURO = '#0f172a'
 
+# Ejecución paso a paso: mientras se muestra un algoritmo, los nodos y
+# aristas se colorean según su estado en lugar de por componente.
+NODO_PENDIENTE = ('#e2e8f0', '#94a3b8')
+ESTADOS_NODO = {
+    'frontera': ('#facc15', '#a16207'),
+    'actual': ('#dc2626', '#7f1d1d'),
+    'visitado': ('#16a34a', '#14532d'),
+    'finalizado': ('#1e3a8a', '#0f172a'),
+}
+ARISTA_TENUE = {'color': '#cbd5e1', 'ancho': 1.8, 'estilo': 'solid'}
+ESTADOS_ARISTA = {
+    'arbol': {'color': '#2563eb', 'ancho': 4.0, 'estilo': 'solid'},
+    'candidata': {'color': '#f59e0b', 'ancho': 3.5, 'estilo': 'dashed'},
+    'descartada': {'color': '#dc2626', 'ancho': 2.5, 'estilo': 'dashed'},
+    'no_arbol': {'color': '#9333ea', 'ancho': 2.5, 'estilo': 'dashed'},
+    'resultado': {'color': RESULTADO, 'ancho': 4.5, 'estilo': 'solid'},
+}
+
+LEYENDA_NODOS = [
+    ('actual', "Actual"),
+    ('frontera', "Descubierto / en espera"),
+    ('visitado', "Visitado"),
+    ('finalizado', "Finalizado"),
+]
+LEYENDA_ARISTAS = [
+    ('arbol', "Árbol / camino en construcción"),
+    ('candidata', "Mejor opción conocida"),
+    ('descartada', "Descartada"),
+    ('no_arbol', "Retroceso / avance / cruce"),
+    ('resultado', "Resultado"),
+]
+
 
 def color_componente(nodo_minimo):
     return PALETA_COMPONENTES[hash(nodo_minimo) % len(PALETA_COMPONENTES)]

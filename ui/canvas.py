@@ -67,6 +67,8 @@ class Lienzo(QObject):
         self.selected_nodes = set()
         self.selected_edges = set()
         self.analysis_highlighted_nodes = {}
+        # Estado del algoritmo mostrado (core.step_state.EstadoVisual) o None.
+        self.vista = None
         self.component_nodes = set()
         self.is_panning = False
         self.pan_origin = None
@@ -112,10 +114,6 @@ class Lienzo(QObject):
     @property
     def pos(self):
         return self.model.pos
-
-    @property
-    def edge_colors(self):
-        return self.model.edge_colors
 
     # Los límites se leen siempre de los ejes para que el zoom propio y
     # cualquier cambio externo de la vista no se pisen entre sí.
@@ -174,7 +172,7 @@ class Lienzo(QObject):
             self._descartarResultado()
 
     def _descartarResultado(self):
-        self.model.edge_colors.clear()
+        self.vista = None
         self.clearAnalysisHighlights()
         self.resultadoDescartado.emit()
 
@@ -676,7 +674,16 @@ class Lienzo(QObject):
             'tamano': TAMANO_NODO,
         }
 
-        if node in self.analysis_highlighted_nodes:
+        mostrando_estados = self.vista is not None and self.vista.usa_estados_de_nodo
+        seleccionado = node in self.selected_nodes or node == self.selected_node
+
+        if mostrando_estados:
+            estado = self.vista.nodos.get(node)
+            relleno, borde = theme.ESTADOS_NODO.get(estado, theme.NODO_PENDIENTE)
+            estilo.update(relleno=relleno, borde=borde, grosor=2)
+            if estado == 'actual':
+                estilo['tamano'] = TAMANO_NODO_DESTACADO
+        elif node in self.analysis_highlighted_nodes:
             # Tamaño proporcional al puntaje del análisis (p. ej. centralidad).
             maximo = max(self.analysis_highlighted_nodes.values()) or 1
             proporcion = self.analysis_highlighted_nodes[node] / maximo
@@ -687,7 +694,10 @@ class Lienzo(QObject):
         if node == self.origen_arista:
             estilo.update(relleno=theme.NODO_ORIGEN_ARISTA, borde=theme.BORDE_ORIGEN_ARISTA, grosor=3,
                           tamano=max(estilo['tamano'], TAMANO_NODO_DESTACADO))
-        elif node in self.selected_nodes or node == self.selected_node:
+        elif seleccionado and mostrando_estados:
+            # Sobre un algoritmo, la selección es solo un anillo: el relleno muestra el estado.
+            estilo.update(borde=theme.NODO_SELECCIONADO, grosor=4)
+        elif seleccionado:
             estilo.update(relleno=theme.NODO_SELECCIONADO, borde=theme.BORDE_SELECCIONADO, grosor=3,
                           tamano=max(estilo['tamano'], TAMANO_NODO_DESTACADO))
 
@@ -707,11 +717,14 @@ class Lienzo(QObject):
 
     def _estilo_arista(self, u, v):
         if self._arista_seleccionada(u, v):
-            return {'color': theme.ARISTA_SELECCIONADA, 'ancho': 4.5}
-        color = self.edge_colors.get((u, v))
-        if color is not None:
-            return {'color': color, 'ancho': 4.5}
-        return {'color': theme.ARISTA, 'ancho': 2.2}
+            return {'color': theme.ARISTA_SELECCIONADA, 'ancho': 4.5, 'estilo': 'solid'}
+        if self.vista is not None:
+            estado = self.vista.estado_arista(u, v)
+            if estado is not None:
+                return theme.ESTADOS_ARISTA[estado]
+            if self.vista.usa_estados_de_nodo:
+                return theme.ARISTA_TENUE
+        return {'color': theme.ARISTA, 'ancho': 2.2, 'estilo': 'solid'}
 
     def _dibujarAristas(self, graph, nodos, tamanos):
         rectas = [edge for edge in graph.edges() if not self._es_curva(*edge)]
@@ -738,6 +751,7 @@ class Lienzo(QObject):
                 edgelist=aristas,
                 edge_color=[estilo['color'] for estilo in estilos],
                 width=[estilo['ancho'] for estilo in estilos],
+                style=[estilo['estilo'] for estilo in estilos],
                 arrows=dirigido,
                 ax=self.ax,
                 **extra_flechas,
@@ -833,16 +847,9 @@ class Lienzo(QObject):
         self.mensaje.emit(f"Grafo cargado: {Path(ruta).name}")
         return True
 
-    def setAristaColor(self, listaAristas, color):
-        # Se vacía el diccionario completo: en no dirigidos cada arista tiene
-        # dos claves, (u, v) y (v, u), y ambas pueden venir de un resultado previo.
-        self.edge_colors.clear()
-
-        for nodo1, nodo2 in listaAristas:
-            self.edge_colors[(nodo1, nodo2)] = color
-            if not self.graph.is_directed():
-                self.edge_colors[(nodo2, nodo1)] = color
-
+    def setVista(self, estado):
+        """Muestra el estado de un algoritmo (None vuelve a la vista normal)."""
+        self.vista = estado
         self.DibujarGrafo()
 
     def Limpiar(self):

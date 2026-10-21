@@ -14,6 +14,7 @@ from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox
 
 from core.graph_service import GraphService
+from core import step_state as st
 from ui import theme
 from ui.canvas import MODO_ARISTA, MODO_NODO, MODO_SELECCIONAR
 from ui.main_window import MainWindow
@@ -87,7 +88,15 @@ class UiTestCase(unittest.TestCase):
         return None
 
     def resaltadas(self):
-        return {edge for edge, color in self.lienzo.edge_colors.items() if color == theme.RESULTADO}
+        """Aristas marcadas como resultado (claves normalizadas: (menor, mayor) en no dirigidos)."""
+        vista = self.lienzo.vista
+        if vista is None:
+            return set()
+        return {clave for clave, estado in vista.aristas.items() if estado == st.RESULTADO}
+
+    def pasos_mostrados(self):
+        lista = self.window.panel.reproductor.lista
+        return [lista.item(i).text() for i in range(lista.count())]
 
 
 class CargaTests(UiTestCase):
@@ -292,7 +301,7 @@ class MenuContextualTests(UiTestCase):
 
         self.accion_de_menu(self.menus[-1], "BFS").trigger()
 
-        self.assertIn("Visita nodo 5 (nivel 0)", self.window.panel.content_label.text())
+        self.assertIn("Visita nodo 5 (nivel 0)", self.pasos_mostrados()[0])
 
     def test_menu_de_arista(self):
         self.clic(*self.punto_medio(1, 8), button=3)
@@ -543,12 +552,13 @@ class ValidacionAristasTests(UiTestCase):
 
     def test_editar_grafo_descarta_resultado_de_algoritmo(self):
         self.window.ejecutarBFS(inicio=1)
-        self.assertTrue(self.lienzo.edge_colors)
+        self.assertIsNotNone(self.lienzo.vista)
 
         self.lienzo.eliminarArista(1, 2)
 
-        self.assertEqual(self.lienzo.edge_colors, {})
+        self.assertIsNone(self.lienzo.vista)
         self.assertFalse(self.window.panel.algorithm_label.isVisible())
+        self.assertEqual(self.pasos_mostrados(), [])
 
 
 class AlgoritmosUiTests(UiTestCase):
@@ -556,7 +566,8 @@ class AlgoritmosUiTests(UiTestCase):
         self.window.solicitarInicio = lambda: 1
         self.window.ejecutarDFS()
 
-        self.assertIn("Pasos DFS", self.window.panel.content_label.text())
+        self.assertIn("Orden de descubrimiento", self.window.panel.content_label.text())
+        self.assertIn("Va de nodo 1 -> nodo 2", self.pasos_mostrados()[1])
         self.assertEqual(self.window.panel.algorithm_label.text(), "DFS - Profundidad")
 
     def test_centralidad_escala_nodos_por_puntaje(self):
@@ -576,7 +587,7 @@ class AlgoritmosUiTests(UiTestCase):
         self.window.ejecutarDijkstra(inicio=1)
 
         # 1 -> 3 -> 6 (6 + 4 = 10) es el más corto.
-        self.assertEqual(self.resaltadas(), {(1, 3), (3, 1), (3, 6), (6, 3)})
+        self.assertEqual(self.resaltadas(), {(1, 3), (3, 6)})
         self.assertIn("costo 10", self.window.panel.content_label.text())
 
     def test_error_del_algoritmo_se_muestra_como_aviso(self):
@@ -592,7 +603,7 @@ class AlgoritmosUiTests(UiTestCase):
         self.window.ejecutarDijkstra(inicio=1)
 
         # 1 -> 3 -> 2 (6 + 3 = 9) es más corto que la arista directa 1 - 2 (10).
-        self.assertEqual(self.resaltadas(), {(1, 3), (3, 1), (3, 2), (2, 3)})
+        self.assertEqual(self.resaltadas(), {(1, 3), (2, 3)})
 
     def test_todas_las_acciones_del_menu_funcionan(self):
         self.window.solicitarInicio = lambda: 1
@@ -606,6 +617,99 @@ class AlgoritmosUiTests(UiTestCase):
                     with self.subTest(tipo=tipo, accion=accion.text()), \
                             mock.patch.object(QMessageBox, "warning"):
                         accion.trigger()
+
+
+class PasoAPasoTests(UiTestCase):
+    def setUp(self):
+        super().setUp()
+        self.window.ejecutarBFS(inicio=1)
+        self.reproductor = self.window.panel.reproductor
+
+    def test_resultado_arranca_en_el_final(self):
+        self.assertEqual(self.reproductor.posicion, self.reproductor.total)
+        self.assertTrue(self.lienzo.vista.final)
+        self.assertTrue(self.window.panel.legend_label.isVisible())
+
+    def test_inicio_muestra_todo_pendiente(self):
+        self.reproductor.irAlInicio()
+
+        estilo = self.lienzo._estilo_nodo(self.lienzo.graph, 1)
+        self.assertEqual(estilo['relleno'], theme.NODO_PENDIENTE[0])
+        self.assertEqual(self.resaltadas(), set())
+
+    def test_avanzar_y_retroceder(self):
+        self.reproductor.irAlInicio()
+        self.reproductor.siguiente()
+
+        self.assertEqual(self.lienzo.vista.nodos, {1: st.ACTUAL})
+        self.assertIn("Visita nodo 1", self.window.statusBar().currentMessage())
+        estilo = self.lienzo._estilo_nodo(self.lienzo.graph, 1)
+        self.assertEqual(estilo['relleno'], theme.ESTADOS_NODO['actual'][0])
+
+        self.reproductor.siguiente()
+        self.reproductor.anterior()
+        self.assertEqual(self.reproductor.posicion, 1)
+
+    def test_clic_en_un_paso_salta_a_el(self):
+        lista = self.reproductor.lista
+        lista.itemClicked.emit(lista.item(2))
+
+        self.assertEqual(self.reproductor.posicion, 3)
+        self.assertEqual(lista.currentRow(), 2)
+
+    def test_reproduccion_automatica_recorre_hasta_el_final(self):
+        self.reproductor.alternarReproduccion()  # en el final: vuelve a empezar
+        self.assertTrue(self.reproductor.reproduciendo)
+        self.assertEqual(self.reproductor.posicion, 0)
+
+        for _ in range(self.reproductor.total):
+            self.reproductor._avanzarAutomatico()
+
+        self.assertEqual(self.reproductor.posicion, self.reproductor.total)
+        self.assertFalse(self.reproductor.reproduciendo)
+
+    def test_controles_se_deshabilitan_en_los_extremos(self):
+        self.assertFalse(self.reproductor.btnSiguiente.isEnabled())
+
+        self.reproductor.irAlInicio()
+
+        self.assertFalse(self.reproductor.btnAnterior.isEnabled())
+        self.assertTrue(self.reproductor.btnSiguiente.isEnabled())
+
+    def test_leyenda_solo_muestra_estados_presentes(self):
+        self.reproductor.irA(1)
+
+        leyenda = self.window.panel.legend_label.text()
+        self.assertIn("Actual", leyenda)
+        self.assertNotIn("Finalizado", leyenda)
+
+    def test_algoritmo_sin_pasos_oculta_controles(self):
+        self.window.nuevoGrafo()
+        self.window.comboTipo.setCurrentIndex(1)
+        self.lienzo.agregarNodo(0.3, 0.5)
+        self.lienzo.agregarNodo(0.7, 0.5)
+        self.lienzo.DibujarArista(1, 2, 1)
+        self.lienzo.DibujarArista(2, 1, 1)
+
+        self.window.ejecutarComponentesFuertes()
+
+        self.assertEqual(self.reproductor.total, 0)
+        self.assertFalse(self.reproductor.lista.isVisibleTo(self.window))
+        self.assertEqual(self.resaltadas(), {(1, 2), (2, 1)})
+        # Sin estados de nodo, los nodos conservan su color de componente.
+        estilo = self.lienzo._estilo_nodo(self.lienzo.graph, 1)
+        self.assertEqual(estilo['relleno'], self.lienzo._color_componente(1))
+
+    def test_quitar_resultado(self):
+        self.window.panel.btnLimpiarAnalisis.click()
+
+        self.assertIsNone(self.lienzo.vista)
+        self.assertEqual(self.pasos_mostrados(), [])
+
+    def test_mover_nodo_conserva_el_resultado(self):
+        self.lienzo.moverNodo(1, (0.2, 0.2))
+
+        self.assertIsNotNone(self.lienzo.vista)
 
 
 class PersistenciaTests(UiTestCase):

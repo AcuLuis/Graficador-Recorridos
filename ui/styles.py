@@ -218,4 +218,39 @@ QStatusBar QLabel {
     color: #475569;
     padding: 0 8px;
 }
+/* ── Panel lateral: secciones y pasos ── */
+QToolButton#encabezadoSeccion,
+QToolButton#encabezadoSeccion:checked {
+    background-color: #e2e8f0;
+    color: #0f172a;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    padding: 6px 8px;
+    text-align: left;
+}
+QToolButton#encabezadoSeccion:hover {
+    background-color: #d6e0ea;
+}
+QListWidget#listaPasos {
+    background-color: #ffffff;
+    border: 1px solid #d1dae4;
+    border-radius: 6px;
+    font-family: 'Consolas', monospace;
+    font-size: 12px;
+}
+QListWidget#listaPasos::item {
+    padding: 3px 4px;
+}
+QListWidget#listaPasos::item:selected {
+    background-color: #fde68a;
+    color: #0f172a;
+}
+QLabel#posicionPaso {
+    color: #475569;
+    font-weight: bold;
+}
+QToolButton#botonReproductor {
+    font-size: 17px;
+    padding: 2px 8px;
+}
 """

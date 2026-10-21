@@ -4,6 +4,7 @@ Cada algoritmo devuelve un diccionario con al menos:
   - "aristas": aristas a resaltar en el lienzo.
   - "pasos": lista de Paso en el orden en que ocurrieron.
   - "content": explicación legible (pasos + resumen).
+  - "resumen": solo las líneas de conclusión.
 Las entradas inválidas se informan con ValueError.
 """
 import heapq
@@ -60,12 +61,13 @@ def _aristas_de_camino(camino):
 
 
 def _componer(titulo, pasos, resumen):
+    """Texto completo (pasos + resumen) y el resumen por separado."""
     lineas = [titulo]
     lineas.extend(paso.texto for paso in pasos)
     if resumen:
         lineas.append("")
         lineas.extend(resumen)
-    return "\n".join(lineas)
+    return {"content": "\n".join(lineas), "resumen": list(resumen)}
 
 
 def _no_alcanzados(graph, alcanzados):
@@ -119,7 +121,7 @@ class AlgorithmsService:
             "pasos": pasos,
             "orden": orden,
             "niveles": nivel,
-            "content": _componer("Pasos BFS:", pasos, resumen),
+            **_componer("Pasos BFS:", pasos, resumen),
         }
 
     @staticmethod
@@ -159,7 +161,7 @@ class AlgorithmsService:
                     aristas.append((node, vecino))
                     clasificacion["arbol"].append((node, vecino))
                     pasos.append(Paso(
-                        "descubrir",
+                        "avanzar",
                         f"Va de nodo {node} -> nodo {vecino} (t={tiempo})",
                         nodo=vecino,
                         arista=(node, vecino),
@@ -208,7 +210,7 @@ class AlgorithmsService:
             "descubrimiento": descubrimiento,
             "finalizacion": finalizacion,
             "clasificacion": clasificacion,
-            "content": _componer("Pasos DFS:", pasos, resumen),
+            **_componer("Pasos DFS:", pasos, resumen),
         }
 
     @staticmethod
@@ -323,7 +325,7 @@ class AlgorithmsService:
                     "aristas": _aristas_de_camino(ciclo),
                     "pasos": pasos,
                     "ciclo_negativo": ciclo,
-                    "content": _componer("Pasos Bellman-Ford:", pasos, resumen),
+                    **_componer("Pasos Bellman-Ford:", pasos, resumen),
                 }
 
         return AlgorithmsService._resultado_caminos(
@@ -377,7 +379,7 @@ class AlgorithmsService:
             "pasos": pasos,
             "distancias": distancias,
             "caminos": caminos,
-            "content": _componer(titulo, pasos, resumen),
+            **_componer(titulo, pasos, resumen),
         }
 
     # ── Árbol de expansión mínima ──────────────────────────────
@@ -446,7 +448,7 @@ class AlgorithmsService:
             "pasos": pasos,
             "descartadas": descartadas,
             "peso_total": peso_total,
-            "content": _componer("Pasos Kruskal:", pasos, AlgorithmsService._resumen_mst(graph, aristas_mst, peso_total)),
+            **_componer("Pasos Kruskal:", pasos, AlgorithmsService._resumen_mst(graph, aristas_mst, peso_total)),
         }
 
     @staticmethod
@@ -497,7 +499,7 @@ class AlgorithmsService:
             "aristas": aristas_mst,
             "pasos": pasos,
             "peso_total": peso_total,
-            "content": _componer("Pasos Prim:", pasos, AlgorithmsService._resumen_mst(graph, aristas_mst, peso_total)),
+            **_componer("Pasos Prim:", pasos, AlgorithmsService._resumen_mst(graph, aristas_mst, peso_total)),
         }
 
     # ── Análisis estructural ───────────────────────────────────
@@ -534,14 +536,14 @@ class AlgorithmsService:
                 "aristas": [],
                 "pasos": pasos,
                 "orden": None,
-                "content": _componer("Pasos Orden Topológico:", pasos, resumen),
+                **_componer("Pasos Orden Topológico:", pasos, resumen),
             }
 
         return {
             "aristas": [],
             "pasos": pasos,
             "orden": orden,
-            "content": _componer(
+            **_componer(
                 "Pasos Orden Topológico:", pasos, [f"Orden topológico: {', '.join(map(str, orden))}"]
             ),
         }
@@ -557,6 +559,7 @@ class AlgorithmsService:
                 "pasos": [],
                 "ciclo": None,
                 "content": f"Detección de ciclos:\nNo se encontraron ciclos. El grafo es un {tipo}.",
+                "resumen": [f"No se encontraron ciclos. El grafo es un {tipo}."],
             }
 
         nodos = [u for u, _ in ciclo] + [ciclo[-1][1]]
@@ -565,6 +568,7 @@ class AlgorithmsService:
             "pasos": [Paso("ciclo", f"{u} -> {v}", arista=(u, v)) for u, v in ciclo],
             "ciclo": nodos,
             "content": f"Detección de ciclos:\nCiclo encontrado: {_fmt_camino(nodos)}",
+            "resumen": [f"Ciclo encontrado: {_fmt_camino(nodos)}"],
         }
 
     @staticmethod
@@ -588,4 +592,5 @@ class AlgorithmsService:
             "pasos": [],
             "componentes": componentes,
             "content": "\n".join(lineas),
+            "resumen": lineas,
         }

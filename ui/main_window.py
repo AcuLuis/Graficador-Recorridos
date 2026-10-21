@@ -10,14 +10,13 @@ from PyQt6.QtWidgets import (
 
 from core.algorithms import AlgorithmsService
 from core.graph_stats import format_stats
+from core.step_state import estado_hasta
 from ui.canvas import MODO_ARISTA, MODO_NODO, MODO_SELECCIONAR, Lienzo
 from ui.dialogs import DialogoArista, DialogoNodo, DialogoPosicion
-from ui import theme
 from ui.info_panel import Panel
 from ui.styles import APP_STYLESHEET
 
 DATOS_PRUEBA = Path(__file__).resolve().parent.parent / "datos_prueba.json"
-COLOR_RESULTADO = theme.RESULTADO
 PESO_MAXIMO = 1_000_000
 
 TIPOS_GRAFO = [("Undirected", "No dirigido"), ("Directed", "Dirigido")]
@@ -52,6 +51,7 @@ arrastra un nodo para moverlo o el fondo para desplazar la vista.</li>
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.resultado = None
         self.setMinimumSize(800, 600)
         self.setStyleSheet(APP_STYLESHEET)
 
@@ -81,9 +81,8 @@ class MainWindow(QMainWindow):
         self.setupStatusBar()
         self.conectarLienzo()
 
-        self.panel.btnEditarSeleccion.clicked.connect(self.handleSelectionEdit)
-        self.panel.btnEliminarSeleccion.clicked.connect(self.handleSelectionDelete)
-        self.panel.btnLimpiarAnalisis.clicked.connect(self.clearAnalysisState)
+        self.panel.btnLimpiarAnalisis.clicked.connect(self.limpiarSelecciones)
+        self.panel.reproductor.pasoCambiado.connect(self.mostrarPaso)
 
         self.setModo(MODO_SELECCIONAR)
         self.updateGraphStats()
@@ -561,10 +560,29 @@ class MainWindow(QMainWindow):
         self.mostrarResultado(resultado, nombre)
 
     def mostrarResultado(self, res, nombre):
+        """Muestra el resultado final; el reproductor permite recorrerlo paso a paso."""
+        self.resultado = res
         self.lienzo.clearAnalysisHighlights()
-        self.lienzo.setAristaColor(res["aristas"], COLOR_RESULTADO)
-        self.panel.setResultado(nombre, res["content"])
-        self.statusBar().showMessage(f"{nombre}: listo.", 5000)
+        # Al cargar los pasos, el reproductor se ubica en el final y emite
+        # pasoCambiado, que dibuja el estado correspondiente.
+        self.panel.setResultado(nombre, "\n".join(res["resumen"]), res["pasos"])
+        if res["pasos"]:
+            self.statusBar().showMessage(
+                f"{nombre}: listo. Usa ⇤ y ▶ en el panel para verlo paso a paso.", 6000
+            )
+        else:
+            self.statusBar().showMessage(f"{nombre}: listo.", 5000)
+
+    def mostrarPaso(self, posicion):
+        if self.resultado is None:
+            return
+        estado = estado_hasta(
+            self.resultado["pasos"], posicion, self.resultado["aristas"], self.lienzo.graph.is_directed()
+        )
+        self.lienzo.setVista(estado)
+        self.panel.setLeyenda(estado)
+        if estado.paso is not None and not estado.final:
+            self.statusBar().showMessage(f"Paso {posicion}: {estado.paso.texto.strip()}")
 
     def _ejecutarDesdeInicio(self, nombre, algoritmo, inicio=None):
         if inicio is None:
@@ -625,15 +643,16 @@ class MainWindow(QMainWindow):
         lines.append("")
         lines.append("El tamaño de cada nodo es proporcional a su centralidad.")
 
-        self.lienzo.setAnalysisHighlights(scores)
-        self.lienzo.setAristaColor([], COLOR_RESULTADO)
+        self.resultado = None
         self.panel.setResultado("Centralidad de grado", "\n".join(lines))
+        self.lienzo.setAnalysisHighlights(scores)
+        self.lienzo.setVista(None)
 
     def limpiarSelecciones(self):
         """Quita el resultado del algoritmo del lienzo y del panel."""
         self.lienzo.clearAnalysisHighlights()
-        self.lienzo.setAristaColor([], COLOR_RESULTADO)
         self.clearAlgorithmResult()
+        self.lienzo.setVista(None)
 
     # ── Resumen y estadísticas ─────────────────────────────────
 
@@ -660,15 +679,6 @@ class MainWindow(QMainWindow):
 
         return "\n".join(lines)
 
-    def clearAnalysisState(self):
-        lienzo = self.lienzo
-        lienzo.clearAnalysisHighlights()
-        lienzo.clearSelection()
-        lienzo.setAristaColor([], COLOR_RESULTADO)
-        self.aplicarFiltro('all')
-        self.clearAlgorithmResult()
-        self.updateSelectionInfo()
-
     def updateGraphStats(self):
         lienzo = self.lienzo
         visible_graph = lienzo._get_visible_graph()
@@ -690,13 +700,12 @@ class MainWindow(QMainWindow):
         self._actualizarTitulo()
 
     def clearAlgorithmResult(self):
+        self.resultado = None
         self.panel.clearContent()
 
     # ── Selección ──────────────────────────────────────────────
 
     def _set_selection_buttons(self, enabled):
-        self.panel.btnEditarSeleccion.setEnabled(enabled)
-        self.panel.btnEliminarSeleccion.setEnabled(enabled)
         self.actEditar.setEnabled(enabled)
         self.actEliminar.setEnabled(enabled)
 
