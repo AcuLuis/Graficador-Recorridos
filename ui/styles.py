@@ -164,4 +164,58 @@ QMessageBox QLabel {
     color: #1f2937;
     font-size: 13px;
 }
+/* ── Barra de herramientas ── */
+QToolBar {
+    background-color: #ffffff;
+    border-bottom: 1px solid #d1dae4;
+    padding: 4px 6px;
+    spacing: 4px;
+}
+QToolBar::separator {
+    background-color: #d1dae4;
+    width: 1px;
+    margin: 4px 6px;
+}
+QToolButton {
+    color: #1f2937;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 13px;
+    font-weight: bold;
+}
+QToolButton:hover {
+    background-color: #e8f2fb;
+    border-color: #b6d7f0;
+}
+QToolButton:checked {
+    background-color: #2a8fcc;
+    border-color: #247db7;
+    color: white;
+}
+QToolButton:disabled {
+    color: #a0aab5;
+}
+QComboBox {
+    background-color: #ffffff;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    padding: 4px 10px;
+    min-width: 110px;
+}
+
+/* ── Lienzo y barra de estado ── */
+QFrame#contenedorLienzo {
+    background-color: #edf2f7;
+}
+QStatusBar {
+    background-color: #ffffff;
+    border-top: 1px solid #d1dae4;
+    color: #334155;
+}
+QStatusBar QLabel {
+    color: #475569;
+    padding: 0 8px;
+}
 """

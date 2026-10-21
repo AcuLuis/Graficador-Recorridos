@@ -1,10 +1,13 @@
 import math
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import networkx as nx
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from PyQt6.QtWidgets import QFileDialog, QMessageBox
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
+from PyQt6.QtWidgets import QMessageBox
 
 from core.graph_model import GraphModel
 from core.graph_service import GraphService
@@ -13,13 +16,49 @@ from core.history import History
 COLOR_ARISTA = '#2c3e50'
 PALETA_COMPONENTES = ['#3498db', '#2ecc71', '#9b59b6', '#f39c12', '#e74c3c', '#1abc9c', '#34495e', '#e84393']
 
+MODO_SELECCIONAR = 'seleccionar'
+MODO_NODO = 'nodo'
+MODO_ARISTA = 'arista'
 
-class Lienzo:
-    def __init__(self, main_window):
-        self.main_window = main_window
+TAMANO_NODO = 700
+# Tolerancias de clic en píxeles: no dependen del nivel de zoom.
+TOLERANCIA_NODO_PX = 4
+TOLERANCIA_ARISTA_PX = 6
+UMBRAL_ARRASTRE_PX = 3
+
+
+@dataclass(frozen=True)
+class ObjetivoClic:
+    """Lo que hay bajo el cursor: un nodo, una arista o el fondo."""
+    tipo: str
+    valor: Any = None
+    x: float = 0.0
+    y: float = 0.0
+
+
+class Lienzo(QObject):
+    """Dibuja el grafo y traduce la interacción del mouse en ediciones del modelo.
+
+    No abre diálogos de la aplicación: pide lo que necesita mediante señales
+    y la ventana principal decide cómo responder.
+    """
+
+    grafoCambiado = pyqtSignal()
+    seleccionCambiada = pyqtSignal()
+    resultadoDescartado = pyqtSignal()
+    tipoGrafoCambiado = pyqtSignal(str)
+    mensaje = pyqtSignal(str)
+    menuContextualSolicitado = pyqtSignal(object)
+    aristaSolicitada = pyqtSignal(object, object)
+    edicionPesoSolicitada = pyqtSignal(object, object)
+    cursorMovido = pyqtSignal(float, float)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
         self.model = GraphModel()
+        self.modo = MODO_SELECCIONAR
+        self.origen_arista = None
         self.dragging_node = None
-        self.drag_start = None
         self.selected_node = None
         self.selected_edge = None
         self.selected_nodes = set()
@@ -29,6 +68,7 @@ class Lienzo:
         self.is_panning = False
         self.pan_origin = None
         self.pan_start_px = None
+        self._pan_movido = False
         self.visual_filter = 'all'
         self.history = History()
         # Estado previo al arrastre; se registra solo si el nodo realmente se mueve.
@@ -42,15 +82,16 @@ class Lienzo:
         # Figure (no pyplot): evita el estado global de pyplot dentro de Qt.
         self.fig = Figure(figsize=(8.5, 5.8))
         self.canvas = FigureCanvas(self.fig)
+        self.canvas.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.ax = self.fig.add_subplot()
         self.fig.patch.set_facecolor('#f5f7fa')
         self.ax.set_facecolor('#f5f7fa')
         self.fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
         self.ax.set_position([0, 0, 1, 1])
-        self.cid = self.canvas.mpl_connect('button_press_event', self.MouseClick)
-        self.motion_cid = self.canvas.mpl_connect('motion_notify_event', self.MouseMove)
-        self.release_cid = self.canvas.mpl_connect('button_release_event', self.MouseRelease)
-        self.scroll_cid = self.canvas.mpl_connect('scroll_event', self.MouseWheel)
+        self.canvas.mpl_connect('button_press_event', self.MouseClick)
+        self.canvas.mpl_connect('motion_notify_event', self.MouseMove)
+        self.canvas.mpl_connect('button_release_event', self.MouseRelease)
+        self.canvas.mpl_connect('scroll_event', self.MouseWheel)
         self.ax.set_xlim(0, 1)
         self.ax.set_ylim(0, 1)
         self.ax.axis('off')
@@ -68,8 +109,8 @@ class Lienzo:
     def edge_colors(self):
         return self.model.edge_colors
 
-    # Los límites se leen siempre de los ejes para que el zoom/pan de la
-    # toolbar de matplotlib y el zoom propio no se pisen entre sí.
+    # Los límites se leen siempre de los ejes para que el zoom propio y
+    # cualquier cambio externo de la vista no se pisen entre sí.
     @property
     def current_xlim(self):
         return list(self.ax.get_xlim())
@@ -86,13 +127,30 @@ class Lienzo:
     def current_ylim(self, limits):
         self.ax.set_ylim(*limits)
 
-    def cambiarTipoGrafo(self, tipo):
-        """Empieza un grafo vacío del tipo indicado (se puede deshacer)."""
+    # ── Modos de edición ───────────────────────────────────────
+
+    def setModo(self, modo):
+        self.modo = modo
+        self.cancelarAccion(limpiar_seleccion=False)
+
+    def cancelarAccion(self, limpiar_seleccion=True):
+        """Esc: cancela una arista a medio crear y, si no había, limpia la selección."""
+        if self.origen_arista is not None:
+            self.origen_arista = None
+            self.mensaje.emit("Creación de arista cancelada.")
+        elif limpiar_seleccion:
+            self.clearSelection()
+            self.seleccionCambiada.emit()
+        self.DibujarGrafo()
+
+    def cambiarTipoGrafo(self, tipo, conservar=True):
+        """Cambia el tipo de grafo convirtiendo las aristas o empezando vacío (se puede deshacer)."""
         self._checkpoint()
-        self.model.clear()
+        if not conservar:
+            self.model.clear()
+            self.component_nodes = set()
         self.model.set_graph_type(tipo)
         self.clearSelection()
-        self.component_nodes = set()
         self._refresh_after_change()
 
     # ── Historial ──────────────────────────────────────────────
@@ -110,21 +168,27 @@ class Lienzo:
     def _descartarResultado(self):
         self.model.edge_colors.clear()
         self.clearAnalysisHighlights()
-        self.main_window.clearAlgorithmResult()
+        self.resultadoDescartado.emit()
 
     def Deshacer(self):
-        self._restaurar(self.history.undo(self.model.to_dict()))
+        if self._restaurar(self.history.undo(self.model.to_dict())):
+            self.mensaje.emit("Cambio deshecho.")
 
     def Rehacer(self):
-        self._restaurar(self.history.redo(self.model.to_dict()))
+        if self._restaurar(self.history.redo(self.model.to_dict())):
+            self.mensaje.emit("Cambio rehecho.")
 
     def _restaurar(self, snapshot):
         if snapshot is None:
-            return
+            return False
         self.model.load_from_dict(snapshot)
+        self.origen_arista = None
         self._descartarResultado()
-        self.main_window.syncTipoGrafo(self.model.graph_type)
+        self.tipoGrafoCambiado.emit(self.model.graph_type)
         self._refresh_after_change()
+        return True
+
+    # ── Selección ──────────────────────────────────────────────
 
     def clearSelection(self):
         self.selected_node = None
@@ -142,6 +206,8 @@ class Lienzo:
             self.selected_edge = None
         if self.dragging_node is not None and self.dragging_node not in graph:
             self.dragging_node = None
+        if self.origen_arista is not None and self.origen_arista not in graph:
+            self.origen_arista = None
         self.selected_nodes = {node for node in self.selected_nodes if node in graph}
         self.selected_edges = {edge for edge in self.selected_edges if graph.has_edge(*edge)}
 
@@ -149,8 +215,36 @@ class Lienzo:
         """Limpia selección inválida y refresca el lienzo y los paneles."""
         self._prune_selection()
         self.DibujarGrafo()
-        self.main_window.updateGraphStats()
-        self.main_window.updateSelectionInfo(self.selected_node, self.selected_edge)
+        self.grafoCambiado.emit()
+        self.seleccionCambiada.emit()
+
+    def _seleccionar(self, nodo=None, arista=None, acumular=False):
+        if acumular:
+            if nodo is not None:
+                self.selected_nodes ^= {nodo}
+                self.selected_node = nodo if nodo in self.selected_nodes else None
+                self.selected_edge = None
+            if arista is not None:
+                self.selected_edges ^= {arista}
+                self.selected_edge = arista if arista in self.selected_edges else None
+                self.selected_node = None
+        else:
+            self.clearSelection()
+            self.selected_node = nodo
+            self.selected_edge = arista
+        self.DibujarGrafo()
+        self.seleccionCambiada.emit()
+
+    # ── Edición ────────────────────────────────────────────────
+
+    def agregarNodo(self, x, y):
+        node_id = 1 if self.graph.number_of_nodes() == 0 else max(self.graph.nodes()) + 1
+        self._checkpoint()
+        self.model.add_node(node_id, (x, y))
+        self.clearSelection()
+        self._refresh_after_change()
+        self.mensaje.emit(f"Nodo {node_id} creado.")
+        return node_id
 
     def DibujarArista(self, posNodo1, posNodo2, peso=1):
         for nodo in (posNodo1, posNodo2):
@@ -175,9 +269,10 @@ class Lienzo:
         self._checkpoint()
         self.model.add_edge(posNodo1, posNodo2, peso=peso)
         self._refresh_after_change()
+        self.mensaje.emit(f"Arista {posNodo1} - {posNodo2} (peso {peso}) creada.")
 
     def Alertas(self, mensaje, titulo="Elemento no encontrado"):
-        alerta = QMessageBox()
+        alerta = QMessageBox(self.canvas)
         alerta.setIcon(QMessageBox.Icon.Warning)
         alerta.setText(titulo)
         alerta.setInformativeText(mensaje)
@@ -185,7 +280,7 @@ class Lienzo:
         alerta.exec()
 
     def alertaConfirmacion(self, mensaje):
-        alerta = QMessageBox()
+        alerta = QMessageBox(self.canvas)
         alerta.setIcon(QMessageBox.Icon.Warning)
         alerta.setText(mensaje)
         alerta.setWindowTitle('Confirmación requerida')
@@ -194,102 +289,126 @@ class Lienzo:
         alerta.exec()
         return alerta.clickedButton() == btnSi
 
+    # ── Mouse ──────────────────────────────────────────────────
+
+    def objetivoEn(self, x, y):
+        nodo = self._find_node_at_position(x, y)
+        if nodo is not None:
+            return ObjetivoClic('nodo', nodo, x, y)
+        arista = self._find_edge_at_position(x, y)
+        if arista is not None:
+            return ObjetivoClic('arista', arista, x, y)
+        return ObjetivoClic('fondo', None, x, y)
+
     def MouseClick(self, event):
         if event.xdata is None or event.ydata is None:
             return
 
-        # Si la toolbar de matplotlib está en modo zoom/pan, el clic es suyo.
-        toolbar = getattr(self.main_window, 'toolbar', None)
-        if toolbar is not None and toolbar.mode != '':
-            return
+        objetivo = self.objetivoEn(event.xdata, event.ydata)
+        acumular = event.key in ('control', 'shift')
 
         if event.button == 3:
-            clicked_node = self._find_node_at_position(event.xdata, event.ydata)
-            if clicked_node is not None:
-                self.eliminarNodo(clicked_node)
+            self._clicDerecho(objetivo)
             return
 
         if event.button == 2:
-            self.is_panning = True
-            self.pan_origin = self.current_xlim + self.current_ylim
-            # Se guardan píxeles: las coordenadas de datos cambian mientras la vista se mueve.
-            self.pan_start_px = (event.x, event.y)
+            self._iniciarPan(event)
             return
 
-        if self.main_window.dibNodoIsSelected():
-            node_id = 1 if len(self.graph.nodes()) == 0 else max(self.graph.nodes()) + 1
-            self._checkpoint()
-            self.model.add_node(node_id, (event.xdata, event.ydata))
-            self.clearSelection()
-            self._refresh_after_change()
+        if event.button != 1:
             return
 
-        clicked_node = self._find_node_at_position(event.xdata, event.ydata)
-        if clicked_node is not None:
-            if event.key in ('control', 'shift'):
-                if clicked_node in self.selected_nodes:
-                    self.selected_nodes.remove(clicked_node)
-                else:
-                    self.selected_nodes.add(clicked_node)
-                self.selected_node = clicked_node if clicked_node in self.selected_nodes else None
-                self.selected_edge = None
-                self.dragging_node = None
-                self.DibujarGrafo()
-                self.main_window.updateSelectionInfo()
-                return
+        if getattr(event, 'dblclick', False):
+            if objetivo.tipo == 'arista':
+                self.edicionPesoSolicitada.emit(*objetivo.valor)
+            return
 
-            self.selected_nodes.clear()
-            self.selected_edges.clear()
-            self.selected_node = clicked_node
-            self.selected_edge = None
-            self.dragging_node = clicked_node
-            self.drag_start = (event.xdata, event.ydata)
-            self._drag_snapshot = self.model.to_dict()
+        if self.modo == MODO_NODO and objetivo.tipo == 'fondo':
+            self.agregarNodo(event.xdata, event.ydata)
+            return
+
+        if self.modo == MODO_ARISTA:
+            self._clicModoArista(objetivo)
+            return
+
+        if objetivo.tipo == 'nodo':
+            self._seleccionar(nodo=objetivo.valor, acumular=acumular)
+            if not acumular:
+                self.dragging_node = objetivo.valor
+                self._drag_snapshot = self.model.to_dict()
+        elif objetivo.tipo == 'arista':
+            self._seleccionar(arista=objetivo.valor, acumular=acumular)
+        else:
+            # Arrastrar el fondo desplaza la vista; un clic sin mover deselecciona.
+            self._iniciarPan(event)
+
+    def _clicDerecho(self, objetivo):
+        if objetivo.tipo == 'nodo' and objetivo.valor not in self.selected_nodes:
+            self._seleccionar(nodo=objetivo.valor)
+        elif objetivo.tipo == 'arista' and objetivo.valor not in self.selected_edges:
+            self._seleccionar(arista=objetivo.valor)
+        self.menuContextualSolicitado.emit(objetivo)
+
+    def _clicModoArista(self, objetivo):
+        if objetivo.tipo != 'nodo':
+            if self.origen_arista is not None:
+                self.cancelarAccion(limpiar_seleccion=False)
+            return
+
+        nodo = objetivo.valor
+        if self.origen_arista is None:
+            self.origen_arista = nodo
             self.DibujarGrafo()
-            self.main_window.updateSelectionInfo(self.selected_node, self.selected_edge)
+            self.mensaje.emit(f"Origen: nodo {nodo}. Haz clic en el nodo destino (Esc para cancelar).")
             return
 
-        clicked_edge = self._find_edge_at_position(event.xdata, event.ydata)
-        if clicked_edge is not None:
-            if event.key in ('control', 'shift'):
-                if clicked_edge in self.selected_edges:
-                    self.selected_edges.remove(clicked_edge)
-                else:
-                    self.selected_edges.add(clicked_edge)
-                self.selected_edge = clicked_edge if clicked_edge in self.selected_edges else None
-                self.selected_node = None
-                self.dragging_node = None
-                self.DibujarGrafo()
-                self.main_window.updateSelectionInfo()
-                return
-
-            self.selected_nodes.clear()
-            self.selected_edges.clear()
-            self.selected_edge = clicked_edge
-            self.selected_node = None
-            self.dragging_node = None
-            self.DibujarGrafo()
-            self.main_window.updateSelectionInfo(self.selected_node, self.selected_edge)
+        if nodo == self.origen_arista:
+            self.cancelarAccion(limpiar_seleccion=False)
             return
 
-        self.clearSelection()
+        origen = self.origen_arista
+        self.origen_arista = None
         self.DibujarGrafo()
-        self.main_window.updateSelectionInfo(self.selected_node, self.selected_edge)
+        self.aristaSolicitada.emit(origen, nodo)
+
+    def _iniciarPan(self, event):
+        self.is_panning = True
+        self._pan_movido = False
+        self.pan_origin = self.current_xlim + self.current_ylim
+        # Se guardan píxeles: las coordenadas de datos cambian mientras la vista se mueve.
+        self.pan_start_px = (event.x, event.y)
+
+    def _a_pixeles(self, x, y):
+        return self.ax.transData.transform((x, y))
+
+    def _radio_nodo_px(self):
+        radio_puntos = math.sqrt(TAMANO_NODO / math.pi)
+        return radio_puntos * self.fig.dpi / 72
+
+    def _nodos_visibles(self):
+        return set(self._get_visible_graph().nodes())
 
     def _find_node_at_position(self, x, y):
-        for node_id, position in self.pos.items():
-            if abs(x - position[0]) <= 0.05 and abs(y - position[1]) <= 0.05:
-                return node_id
-        return None
+        """Nodo visible más cercano al punto, si el punto cae dentro de su círculo."""
+        px, py = self._a_pixeles(x, y)
+        limite = self._radio_nodo_px() + TOLERANCIA_NODO_PX
+        mejor, mejor_distancia = None, limite
+        for node_id in self._nodos_visibles():
+            nx_px, ny_px = self._a_pixeles(*self.pos[node_id])
+            distancia = math.hypot(px - nx_px, py - ny_px)
+            if distancia <= mejor_distancia:
+                mejor, mejor_distancia = node_id, distancia
+        return mejor
 
     def _find_edge_at_position(self, x, y):
-        threshold = 0.05
-        for edge in self.graph.edges():
-            if edge[0] in self.pos and edge[1] in self.pos:
-                dist = self._distance_to_segment((x, y), self.pos[edge[0]], self.pos[edge[1]])
-                if dist <= threshold:
-                    return edge
-        return None
+        """Arista visible más cercana al punto (en píxeles)."""
+        punto = self._a_pixeles(x, y)
+        mejor, mejor_distancia = None, TOLERANCIA_ARISTA_PX
+        for u, v in self._get_visible_graph().edges():
+            distancia = self._distance_to_segment(punto, self._a_pixeles(*self.pos[u]), self._a_pixeles(*self.pos[v]))
+            if distancia <= mejor_distancia:
+                mejor, mejor_distancia = (u, v), distancia
+        return mejor
 
     def _distance_to_segment(self, point, start, end):
         px, py = point
@@ -309,11 +428,20 @@ class Lienzo:
         return math.hypot(px - closest_x, py - closest_y)
 
     def MouseMove(self, event):
+        if event.xdata is not None and event.ydata is not None:
+            self.cursorMovido.emit(event.xdata, event.ydata)
+
         if self.is_panning and self.pan_origin is not None and self.pan_start_px is not None:
+            desplazamiento_x = event.x - self.pan_start_px[0]
+            desplazamiento_y = event.y - self.pan_start_px[1]
+            if not self._pan_movido and math.hypot(desplazamiento_x, desplazamiento_y) < UMBRAL_ARRASTRE_PX:
+                return
+            self._pan_movido = True
+
             x0, x1, y0, y1 = self.pan_origin
             bbox = self.ax.bbox
-            dx = (event.x - self.pan_start_px[0]) * (x1 - x0) / bbox.width
-            dy = (event.y - self.pan_start_px[1]) * (y1 - y0) / bbox.height
+            dx = desplazamiento_x * (x1 - x0) / bbox.width
+            dy = desplazamiento_y * (y1 - y0) / bbox.height
 
             self.current_xlim = [x0 - dx, x1 - dx]
             self.current_ylim = [y0 - dy, y1 - dy]
@@ -333,16 +461,20 @@ class Lienzo:
 
     def MouseRelease(self, event):
         hubo_arrastre = self.dragging_node is not None and self._drag_snapshot is None
+        clic_en_fondo = self.is_panning and not self._pan_movido and event.button == 1
+
         self._drag_snapshot = None
-        if hubo_arrastre:
-            # La posición del panel y el estado de "cambios sin guardar" cambiaron.
-            self.dragging_node = None
-            self._refresh_after_change()
         self.dragging_node = None
-        self.drag_start = None
         self.is_panning = False
         self.pan_origin = None
         self.pan_start_px = None
+
+        if hubo_arrastre:
+            # La posición del panel y el estado de "cambios sin guardar" cambiaron.
+            self._refresh_after_change()
+        elif clic_en_fondo and (self.selected_node is not None or self.selected_edge is not None
+                                or self.selected_nodes or self.selected_edges):
+            self._seleccionar()
 
     def MouseWheel(self, event):
         if event.xdata is None or event.ydata is None:
@@ -370,52 +502,31 @@ class Lienzo:
         ]
         self.canvas.draw_idle()
 
+    # ── Vista ──────────────────────────────────────────────────
+
     def resetView(self):
         self.current_xlim = [0, 1]
         self.current_ylim = [0, 1]
         self.canvas.draw_idle()
 
-    def clearAnalysisHighlights(self):
-        self.analysis_highlighted_nodes = {}
+    def ajustarVista(self):
+        """Encuadra todos los nodos visibles con un margen."""
+        nodos = self._nodos_visibles()
+        if not nodos:
+            self.resetView()
+            return
 
-    def setAnalysisHighlights(self, node_scores):
-        self.analysis_highlighted_nodes = dict(node_scores)
+        xs = [self.pos[node][0] for node in nodos]
+        ys = [self.pos[node][1] for node in nodos]
+        ancho = max(max(xs) - min(xs), 0.2)
+        alto = max(max(ys) - min(ys), 0.2)
+        centro_x = (max(xs) + min(xs)) / 2
+        centro_y = (max(ys) + min(ys)) / 2
+        margen = 1.3
 
-    def setVisualFilter(self, mode):
-        self.visual_filter = mode if mode in {'all', 'hide_isolated', 'component'} else 'all'
-        if mode != 'component':
-            self.component_nodes = set()
-        self.DibujarGrafo()
-        self.main_window.updateGraphStats()
-
-    def focusCurrentComponent(self):
-        pivot = self.selected_node
-        if pivot is None:
-            return False
-
-        if self.graph.is_directed():
-            components = nx.weakly_connected_components(self.graph)
-        else:
-            components = nx.connected_components(self.graph)
-
-        for component in components:
-            if pivot in component:
-                self.component_nodes = set(component)
-                self.visual_filter = 'component'
-                self.DibujarGrafo()
-                self.main_window.updateGraphStats()
-                return True
-
-        return False
-
-    def _get_visible_graph(self):
-        if self.visual_filter == 'hide_isolated':
-            visible_nodes = [node for node in self.graph.nodes() if self.graph.degree(node) > 0]
-            return self.graph.subgraph(visible_nodes).copy()
-        if self.visual_filter == 'component':
-            visible_nodes = list(self.component_nodes) if self.component_nodes else list(self.graph.nodes())
-            return self.graph.subgraph(visible_nodes).copy()
-        return self.graph.copy()
+        self.current_xlim = [centro_x - ancho * margen / 2, centro_x + ancho * margen / 2]
+        self.current_ylim = [centro_y - alto * margen / 2, centro_y + alto * margen / 2]
+        self.canvas.draw_idle()
 
     def zoomIn(self):
         self._apply_zoom(1.15)
@@ -435,6 +546,50 @@ class Lienzo:
         self.current_xlim = [center_x - x_range / 2, center_x + x_range / 2]
         self.current_ylim = [center_y - y_range / 2, center_y + y_range / 2]
         self.canvas.draw_idle()
+
+    def clearAnalysisHighlights(self):
+        self.analysis_highlighted_nodes = {}
+
+    def setAnalysisHighlights(self, node_scores):
+        self.analysis_highlighted_nodes = dict(node_scores)
+
+    def setVisualFilter(self, mode):
+        self.visual_filter = mode if mode in {'all', 'hide_isolated', 'component'} else 'all'
+        if mode != 'component':
+            self.component_nodes = set()
+        self.DibujarGrafo()
+        self.grafoCambiado.emit()
+
+    def focusCurrentComponent(self):
+        pivot = self.selected_node
+        if pivot is None:
+            return False
+
+        if self.graph.is_directed():
+            components = nx.weakly_connected_components(self.graph)
+        else:
+            components = nx.connected_components(self.graph)
+
+        for component in components:
+            if pivot in component:
+                self.component_nodes = set(component)
+                self.visual_filter = 'component'
+                self.DibujarGrafo()
+                self.grafoCambiado.emit()
+                return True
+
+        return False
+
+    def _get_visible_graph(self):
+        if self.visual_filter == 'hide_isolated':
+            visible_nodes = [node for node in self.graph.nodes() if self.graph.degree(node) > 0]
+            return self.graph.subgraph(visible_nodes).copy()
+        if self.visual_filter == 'component':
+            visible_nodes = list(self.component_nodes) if self.component_nodes else list(self.graph.nodes())
+            return self.graph.subgraph(visible_nodes).copy()
+        return self.graph.copy()
+
+    # ── Dibujo ─────────────────────────────────────────────────
 
     def DibujarGrafo(self):
         visible_graph = self._get_visible_graph()
@@ -460,23 +615,33 @@ class Lienzo:
         node_colors = []
         node_sizes = []
         node_edgecolors = []
+        node_linewidths = []
         for node in visible_graph.nodes():
-            if node in self.selected_nodes or node == self.selected_node:
+            if node == self.origen_arista:
+                node_colors.append('#16a34a')
+                node_sizes.append(1000)
+                node_edgecolors.append('#14532d')
+                node_linewidths.append(3)
+            elif node in self.selected_nodes or node == self.selected_node:
                 node_colors.append('#e67e22')
                 node_sizes.append(1000)
                 node_edgecolors.append('#d35400')
+                node_linewidths.append(2)
             elif visible_graph.degree(node) == 0:
                 node_colors.append('#f39c12')
                 node_sizes.append(900)
                 node_edgecolors.append('#d68910')
+                node_linewidths.append(2)
             elif node in self.analysis_highlighted_nodes:
                 node_colors.append(component_colors.get(node, '#3498db'))
                 node_sizes.append(900)
                 node_edgecolors.append('#8e44ad')
+                node_linewidths.append(2)
             else:
                 node_colors.append(component_colors.get(node, '#3498db'))
-                node_sizes.append(700)
+                node_sizes.append(TAMANO_NODO)
                 node_edgecolors.append('#2980b9')
+                node_linewidths.append(2)
 
         edge_colors_draw = []
         edge_widths = []
@@ -495,7 +660,7 @@ class Lienzo:
             node_color=node_colors,
             node_size=node_sizes,
             edgecolors=node_edgecolors,
-            linewidths=2,
+            linewidths=node_linewidths,
             ax=self.ax,
         )
 
@@ -529,25 +694,23 @@ class Lienzo:
 
         self.canvas.draw_idle()
 
-    def GuardarIMG(self):
-        file_path, _ = QFileDialog.getSaveFileName(self.main_window, 'Guardar Imagen', '', 'PNG Files (*.png);;All Files (*)')
-        if file_path:
-            title = self.fig.suptitle('Visualizador de Grafos - ADA', fontsize=14, fontweight='bold', y=0.98)
-            summary = self.main_window.buildGraphSummaryText()
-            summary_text = self.fig.text(
-                0.02,
-                0.02,
-                summary,
-                fontsize=9,
-                ha='left',
-                va='bottom',
-                bbox=dict(boxstyle='round,pad=0.4', facecolor='#ffffff', edgecolor='#cbd5e1', alpha=0.9),
-            )
-            try:
-                self.fig.savefig(file_path, bbox_inches='tight', pad_inches=0.25, facecolor='#f5f7fa')
-            finally:
-                title.remove()
-                summary_text.remove()
+    def exportarImagen(self, ruta, resumen):
+        title = self.fig.suptitle('Visualizador de Grafos - ADA', fontsize=14, fontweight='bold', y=0.98)
+        summary_text = self.fig.text(
+            0.02,
+            0.02,
+            resumen,
+            fontsize=9,
+            ha='left',
+            va='bottom',
+            bbox=dict(boxstyle='round,pad=0.4', facecolor='#ffffff', edgecolor='#cbd5e1', alpha=0.9),
+        )
+        try:
+            self.fig.savefig(ruta, bbox_inches='tight', pad_inches=0.25, facecolor='#f5f7fa')
+        finally:
+            title.remove()
+            summary_text.remove()
+            self.canvas.draw_idle()
 
     # ── Documento ──────────────────────────────────────────────
 
@@ -568,13 +731,15 @@ class Lienzo:
         """Guarda el grafo en 'ruta'. Propaga OSError para que la ventana lo informe."""
         GraphService.save_json(self.model, ruta)
         self._marcarGuardado(str(ruta))
-        self.main_window.updateGraphStats()
+        self.grafoCambiado.emit()
+        self.mensaje.emit(f"Grafo guardado en {ruta}")
 
     def nuevoGrafo(self):
         self.model = GraphModel(self.model.graph_type)
         self.history.clear()
         self._descartarResultado()
         self.clearSelection()
+        self.origen_arista = None
         self.component_nodes = set()
         self.visual_filter = 'all'
         self._marcarGuardado(None)
@@ -596,12 +761,14 @@ class Lienzo:
         self.history.clear()
         self._descartarResultado()
         self.clearSelection()
+        self.origen_arista = None
         if como_plantilla:
             self._marcarGuardado(None, nombre_sin_ruta=Path(ruta).stem)
         else:
             self._marcarGuardado(str(ruta))
-        self.main_window.syncTipoGrafo(self.model.graph_type)
+        self.tipoGrafoCambiado.emit(self.model.graph_type)
         self._refresh_after_change()
+        self.mensaje.emit(f"Grafo cargado: {Path(ruta).name}")
         return True
 
     def setAristaColor(self, listaAristas, color):
@@ -615,7 +782,6 @@ class Lienzo:
                 self.edge_colors[(nodo2, nodo1)] = color
 
         self.DibujarGrafo()
-        self.main_window.updateGraphStats()
 
     def Limpiar(self):
         if self.graph.number_of_nodes() == 0:
@@ -625,6 +791,7 @@ class Lienzo:
         self.clearSelection()
         self.component_nodes = set()
         self._refresh_after_change()
+        self.mensaje.emit("Lienzo limpio (Ctrl+Z para recuperarlo).")
 
     def eliminarNodo(self, node_id):
         if node_id not in self.graph:
@@ -633,6 +800,7 @@ class Lienzo:
         self._checkpoint()
         self.model.eliminar_nodo(node_id)
         self._refresh_after_change()
+        self.mensaje.emit(f"Nodo {node_id} eliminado.")
 
     def eliminarArista(self, node1, node2):
         if not self.graph.has_edge(node1, node2):
@@ -641,6 +809,7 @@ class Lienzo:
         self._checkpoint()
         self.model.eliminar_arista(node1, node2)
         self._refresh_after_change()
+        self.mensaje.emit(f"Arista {node1} - {node2} eliminada.")
 
     def eliminarSeleccion(self):
         """Elimina, en un solo paso deshacible, todo lo seleccionado."""
@@ -665,6 +834,7 @@ class Lienzo:
 
         self.clearSelection()
         self._refresh_after_change()
+        self.mensaje.emit(f"Eliminados: {len(nodes)} nodo(s), {len(edges)} arista(s).")
 
     def actualizarPesoArista(self, node1, node2, nuevo_peso):
         if not self.graph.has_edge(node1, node2):
@@ -675,6 +845,7 @@ class Lienzo:
         self._checkpoint()
         self.model.update_edge_weight(node1, node2, nuevo_peso)
         self._refresh_after_change()
+        self.mensaje.emit(f"Peso de {node1} - {node2} actualizado a {nuevo_peso}.")
 
     def moverNodo(self, node_id, posicion):
         self._checkpoint(invalida_resultado=False)

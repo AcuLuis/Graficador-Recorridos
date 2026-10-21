@@ -3,7 +3,7 @@ from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 TEXTO_SIN_SELECCION = "Selecciona un nodo o una arista para ver sus propiedades."
-TEXTO_SIN_RESULTADO = "Ejecuta un algoritmo para ver los pasos."
+TEXTO_SIN_RESULTADO = "Ejecuta un algoritmo desde el menú Algoritmos o con clic derecho sobre un nodo."
 
 
 class Panel(QWidget):
@@ -25,16 +25,10 @@ class Panel(QWidget):
         self.selection_label = self._crear_label(TEXTO_SIN_SELECCION)
         self.stats_label = self._crear_label("Resumen del grafo:")
         self.view_label = self._crear_label("Vista actual: Todo")
+        self.algorithm_label = self._crear_label("")
+        self.algorithm_label.setVisible(False)
         self.content_label = self._crear_label(TEXTO_SIN_RESULTADO)
         self.content_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-
-        self.help_label = self._crear_label(
-            "Ayuda rápida:\n"
-            "• Click en el lienzo para crear nodos cuando está activo 'Dibujar Nodo'.\n"
-            "• Ctrl/Shift + click para seleccionar varios nodos o aristas.\n"
-            "• Botón central del mouse para desplazar la vista.\n"
-            "• Usa 'Ocultar aislados' o 'Componente actual' para enfocar análisis."
-        )
 
         self.btnEditarSeleccion = QPushButton("Editar selección")
         self.btnEliminarSeleccion = QPushButton("Eliminar selección")
@@ -46,6 +40,11 @@ class Panel(QWidget):
         font.setPointSize(11)
         self.selection_label.setFont(font)
 
+        titulo_font = QFont()
+        titulo_font.setPointSize(13)
+        titulo_font.setBold(True)
+        self.algorithm_label.setFont(titulo_font)
+
         mono_font = QFont("Consolas")
         mono_font.setStyleHint(QFont.StyleHint.Monospace)
         mono_font.setPointSize(11)
@@ -55,10 +54,11 @@ class Panel(QWidget):
         self.scroll_layout.addWidget(self.btnEditarSeleccion)
         self.scroll_layout.addWidget(self.btnEliminarSeleccion)
         self.scroll_layout.addWidget(self.btnLimpiarAnalisis)
-        self.scroll_layout.addWidget(self.help_label)
         self.scroll_layout.addWidget(self.stats_label)
         self.scroll_layout.addWidget(self.view_label)
+        self.scroll_layout.addWidget(self.algorithm_label)
         self.scroll_layout.addWidget(self.content_label)
+        self.scroll_layout.addStretch()
 
         self.scrollarea.setWidget(self.scroll_content)
 
@@ -74,11 +74,16 @@ class Panel(QWidget):
         label.setWordWrap(True)
         return label
 
+    def setResultado(self, nombre, contenido):
+        self.algorithm_label.setText(nombre)
+        self.algorithm_label.setVisible(bool(nombre))
+        self.content_label.setText(contenido)
+
     def setContent(self, newcontent):
         self.content_label.setText(newcontent)
 
     def clearContent(self):
-        self.content_label.setText(TEXTO_SIN_RESULTADO)
+        self.setResultado("", TEXTO_SIN_RESULTADO)
 
     def setSelectionInfo(self, newcontent):
         self.selection_label.setText(newcontent)
