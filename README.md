@@ -193,6 +193,12 @@ Las sugerencias y mejoras son bienvenidas. Puedes abrir un *issue* para reportar
 
 Este proyecto se distribuye bajo la [licencia MIT](LICENSE): puedes usarlo, copiarlo, modificarlo y distribuirlo libremente, también con fines comerciales, siempre que conserves el aviso de copyright.
 
+## ¿Te fue útil?
+
+Si este proyecto te ayudó a estudiar, enseñar o entender mejor los algoritmos sobre grafos, regálale una ⭐ en GitHub. Es una forma sencilla de agradecer y ayuda a que más personas lo encuentren.
+
+También puedes compartirlo con quien lo necesite o contar cómo lo usaste abriendo un *issue*. ¡Gracias!
+
 ## Autor
 
 Luis Antonio Acuña Ayala ([@AcuLuis](https://github.com/AcuLuis))
