@@ -91,15 +91,21 @@ class DialogoArista(_DialogoFormulario):
 class DialogoNodo(_DialogoFormulario):
     """Diálogo genérico para solicitar un ID de nodo."""
 
-    def __init__(self, titulo="Ingresar Nodo", mensaje="Ingresa ID del Nodo:", parent=None):
+    def __init__(self, titulo="Ingresar Nodo", mensaje="Ingresa ID del Nodo:", parent=None,
+                 valor_inicial=None, opcional=False):
         super().__init__(titulo, "Aceptar", parent)
         self.valor1 = None
-        self.entrada1 = self._agregar_campo(mensaje, "Ej. 1", QIntValidator())
+        self.opcional = opcional
+        placeholder = "Opcional" if opcional else "Ej. 1"
+        self.entrada1 = self._agregar_campo(mensaje, placeholder, QIntValidator())
+        if valor_inicial is not None:
+            self.entrada1.setText(str(valor_inicial))
+            self.entrada1.selectAll()
 
     def Guardar(self):
         valor1 = self.entrada1.text().strip()
 
-        if valor1:
+        if valor1 or self.opcional:
             self.valor1 = valor1
             self.accept()
         else:

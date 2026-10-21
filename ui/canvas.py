@@ -605,8 +605,9 @@ class Lienzo:
         return True
 
     def setAristaColor(self, listaAristas, color):
-        for edge in self.graph.edges():
-            self.edge_colors[edge] = COLOR_ARISTA
+        # Se vacía el diccionario completo: en no dirigidos cada arista tiene
+        # dos claves, (u, v) y (v, u), y ambas pueden venir de un resultado previo.
+        self.edge_colors.clear()
 
         for nodo1, nodo2 in listaAristas:
             self.edge_colors[(nodo1, nodo2)] = color

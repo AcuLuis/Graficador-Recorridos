@@ -120,26 +120,32 @@ class MainWindow(QMainWindow):
 
         # Algoritmos
         menuAlgoritmos = menubar.addMenu("&Algoritmos")
-
-        btnBFS = QAction('BFS - Búsqueda en anchura', self)
-        btnBFS.triggered.connect(self.ejecutarBFS)
-        menuAlgoritmos.addAction(btnBFS)
-
-        btnDFS = QAction('DFS - Búsqueda en profundidad', self)
-        btnDFS.triggered.connect(self.ejecutarDFS)
-        menuAlgoritmos.addAction(btnDFS)
-
-        btnKruskal = QAction('Kruskal - Árbol de expansión mínima', self)
-        btnKruskal.triggered.connect(self.ejecutarKruskal)
-        menuAlgoritmos.addAction(btnKruskal)
-
-        btnCentralidad = QAction('Centralidad de grado', self)
-        btnCentralidad.triggered.connect(self.ejecutarCentralidad)
-        menuAlgoritmos.addAction(btnCentralidad)
-
-        btnDIJS = QAction('Dijkstra - Camino más corto', self)
-        btnDIJS.triggered.connect(self.ejecutarDijkstra)
-        menuAlgoritmos.addAction(btnDIJS)
+        grupos = [
+            ("Recorridos", [
+                ('BFS - Búsqueda en anchura', self.ejecutarBFS),
+                ('DFS - Búsqueda en profundidad', self.ejecutarDFS),
+            ]),
+            ("Caminos mínimos", [
+                ('Dijkstra - Camino más corto', self.ejecutarDijkstra),
+                ('Bellman-Ford - Admite pesos negativos', self.ejecutarBellmanFord),
+            ]),
+            ("Árbol de expansión mínima", [
+                ('Kruskal', self.ejecutarKruskal),
+                ('Prim', self.ejecutarPrim),
+            ]),
+            ("Análisis", [
+                ('Orden topológico', self.ejecutarOrdenTopologico),
+                ('Detectar ciclos', self.ejecutarDeteccionCiclos),
+                ('Componentes fuertemente conexas', self.ejecutarComponentesFuertes),
+                ('Centralidad de grado', self.ejecutarCentralidad),
+            ]),
+        ]
+        for titulo, acciones in grupos:
+            submenu = menuAlgoritmos.addMenu(titulo)
+            for texto, slot in acciones:
+                accion = QAction(texto, self)
+                accion.triggered.connect(slot)
+                submenu.addAction(accion)
 
     # ── Archivo ────────────────────────────────────────────────
 
@@ -213,54 +219,101 @@ class MainWindow(QMainWindow):
 
     # ── Algoritmos ──────────────────────────────────────────────
 
-    def solicitarInicio(self):
-        if not self.lienzo.graph.nodes():
+    def _grafoTieneNodos(self):
+        if self.lienzo.graph.number_of_nodes() == 0:
             QMessageBox.warning(self, "Advertencia", "El grafo no tiene nodos.")
-            return None
+            return False
+        return True
 
-        dialogN = DialogoNodo("Inicio de Recorrido", "Ingresa el ID del Nodo de inicio:", self)
-        if dialogN.exec() == QDialog.DialogCode.Accepted:
-            try:
-                return int(dialogN.valor1)
-            except ValueError:
-                QMessageBox.warning(self, "Error", "El ID debe ser un número entero.")
-        return None
+    def _pedirNodo(self, titulo, mensaje, sugerido=None, opcional=False):
+        """Devuelve (aceptado, nodo). Con 'opcional', un campo vacío da nodo None."""
+        dialogo = DialogoNodo(titulo, mensaje, self, valor_inicial=sugerido, opcional=opcional)
+        if dialogo.exec() != QDialog.DialogCode.Accepted:
+            return False, None
+        if not dialogo.valor1:
+            return True, None
+        try:
+            return True, int(dialogo.valor1)
+        except ValueError:
+            QMessageBox.warning(self, "Error", "El ID debe ser un número entero.")
+            return False, None
+
+    def solicitarInicio(self):
+        """Pide el nodo de inicio; propone el nodo seleccionado si lo hay."""
+        if not self._grafoTieneNodos():
+            return None
+        _, inicio = self._pedirNodo(
+            "Nodo de inicio", "Ingresa el ID del Nodo de inicio:", sugerido=self.lienzo.selected_node
+        )
+        return inicio
+
+    def solicitarDestino(self):
+        """Devuelve (aceptado, destino); destino None significa 'todos los nodos'."""
+        return self._pedirNodo(
+            "Nodo destino",
+            "Ingresa el ID del Nodo destino\n(déjalo vacío para ver todos):",
+            opcional=True,
+        )
+
+    def _ejecutar(self, nombre, calcular):
+        try:
+            resultado = calcular()
+        except ValueError as exc:
+            QMessageBox.warning(self, nombre, str(exc))
+            return
+        self.mostrarResultado(resultado, nombre)
 
     def mostrarResultado(self, res, nombre):
+        self.lienzo.clearAnalysisHighlights()
+        self.lienzo.setAristaColor(res["aristas"], COLOR_RESULTADO)
         self.panel.setContent(res["content"])
-        if res["aristas"]:
-            self.lienzo.setAristaColor(res["aristas"], COLOR_RESULTADO)
         self.centralWidget.setNombreAlgoritmo(nombre)
 
-    def ejecutarBFS(self):
+    def _ejecutarDesdeInicio(self, nombre, algoritmo):
         inicio = self.solicitarInicio()
         if inicio is not None:
-            self.mostrarResultado(AlgorithmsService.bfs(self.lienzo.graph, inicio), "BFS - Anchura")
+            self._ejecutar(nombre, lambda: algoritmo(self.lienzo.graph, inicio))
+
+    def ejecutarBFS(self):
+        self._ejecutarDesdeInicio("BFS - Anchura", AlgorithmsService.bfs)
 
     def ejecutarDFS(self):
-        inicio = self.solicitarInicio()
-        if inicio is not None:
-            self.mostrarResultado(AlgorithmsService.dfs(self.lienzo.graph, inicio), "DFS - Profundidad")
-
-    def ejecutarKruskal(self):
-        if self.lienzo.graph.is_directed():
-            QMessageBox.warning(self, "Algoritmo Incompatible", "El algoritmo de Kruskal solo se puede ejecutar en Grafos No Dirigidos.")
-            return
-
-        if not self.lienzo.graph.edges():
-            QMessageBox.warning(self, "Advertencia", "El grafo no tiene aristas para el árbol.")
-            return
-
-        self.mostrarResultado(AlgorithmsService.kruskal(self.lienzo.graph), "Kruskal - Árbol Mínimo")
+        self._ejecutarDesdeInicio("DFS - Profundidad", AlgorithmsService.dfs)
 
     def ejecutarDijkstra(self):
         inicio = self.solicitarInicio()
-        if inicio is not None:
-            self.mostrarResultado(AlgorithmsService.dijkstra(self.lienzo.graph, inicio), "Dijkstra - Camino Mínimo")
+        if inicio is None:
+            return
+        aceptado, destino = self.solicitarDestino()
+        if aceptado:
+            self._ejecutar(
+                "Dijkstra - Camino Mínimo",
+                lambda: AlgorithmsService.dijkstra(self.lienzo.graph, inicio, destino),
+            )
+
+    def ejecutarBellmanFord(self):
+        self._ejecutarDesdeInicio("Bellman-Ford", AlgorithmsService.bellman_ford)
+
+    def ejecutarKruskal(self):
+        self._ejecutar("Kruskal - Árbol Mínimo", lambda: AlgorithmsService.kruskal(self.lienzo.graph))
+
+    def ejecutarPrim(self):
+        self._ejecutarDesdeInicio("Prim - Árbol Mínimo", AlgorithmsService.prim)
+
+    def ejecutarOrdenTopologico(self):
+        self._ejecutar("Orden Topológico", lambda: AlgorithmsService.orden_topologico(self.lienzo.graph))
+
+    def ejecutarDeteccionCiclos(self):
+        self._ejecutar("Detección de ciclos", lambda: AlgorithmsService.detectar_ciclo(self.lienzo.graph))
+
+    def ejecutarComponentesFuertes(self):
+        self._ejecutar(
+            "Componentes fuertemente conexas",
+            lambda: AlgorithmsService.componentes_fuertes(self.lienzo.graph),
+        )
 
     def ejecutarCentralidad(self):
-        if not self.lienzo.graph.nodes():
-            QMessageBox.warning(self, "Advertencia", "El grafo no tiene nodos para analizar.")
+        if not self._grafoTieneNodos():
             return
 
         scores = nx.degree_centrality(self.lienzo.graph)
@@ -272,7 +325,7 @@ class MainWindow(QMainWindow):
 
         self.panel.setContent("\n".join(lines))
         self.lienzo.setAnalysisHighlights(dict(top_nodes))
-        self.lienzo.DibujarGrafo()
+        self.lienzo.setAristaColor([], COLOR_RESULTADO)
         self.centralWidget.setNombreAlgoritmo("Centralidad de grado")
 
     def limpiarSelecciones(self):

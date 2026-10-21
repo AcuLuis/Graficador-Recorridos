@@ -292,6 +292,48 @@ class AlgoritmosUiTests(UiTestCase):
 
         self.assertEqual(len(self.lienzo.analysis_highlighted_nodes), 5)
 
+    def test_dijkstra_con_destino_resalta_solo_el_camino(self):
+        self.window.solicitarInicio = lambda: 1
+        self.window.solicitarDestino = lambda: (True, 6)
+
+        self.window.ejecutarDijkstra()
+
+        resaltadas = {edge for edge, color in self.lienzo.edge_colors.items() if color == "blue"}
+        # 1 -> 8 -> 4 -> 6 (3 + 9 + 1 = 13) vs 1 -> 3 -> 6 (6 + 4 = 10)
+        self.assertEqual(resaltadas, {(1, 3), (3, 1), (3, 6), (6, 3)})
+        self.assertIn("costo 10", self.window.panel.content_label.text())
+
+    def test_error_del_algoritmo_se_muestra_como_aviso(self):
+        self.window.solicitarInicio = lambda: 99
+        with mock.patch.object(QMessageBox, "warning") as aviso:
+            self.window.ejecutarBFS()
+
+        aviso.assert_called_once()
+        self.assertIn("no existe", aviso.call_args.args[2])
+
+    def test_nuevo_resultado_reemplaza_colores_anteriores(self):
+        self.window.solicitarInicio = lambda: 1
+        self.window.ejecutarBFS()
+        self.window.solicitarDestino = lambda: (True, 2)
+        self.window.ejecutarDijkstra()
+
+        # 1 -> 3 -> 2 (6 + 3 = 9) es más corto que la arista directa 1 - 2 (10).
+        resaltadas = {edge for edge, color in self.lienzo.edge_colors.items() if color == "blue"}
+        self.assertEqual(resaltadas, {(1, 3), (3, 1), (3, 2), (2, 3)})
+
+    def test_todas_las_acciones_del_menu_funcionan(self):
+        self.window.solicitarInicio = lambda: 1
+        self.window.solicitarDestino = lambda: (True, None)
+        menu = next(a.menu() for a in self.window.menuBar().actions() if "Algoritmos" in a.text())
+
+        for tipo in ("Undirected", "Directed"):
+            self.lienzo.model.set_graph_type(tipo)
+            for grupo in menu.actions():
+                for accion in grupo.menu().actions():
+                    with self.subTest(tipo=tipo, accion=accion.text()), \
+                            mock.patch.object(QMessageBox, "warning"):
+                        accion.trigger()
+
 
 class PersistenciaTests(UiTestCase):
     def setUp(self):
