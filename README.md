@@ -185,6 +185,14 @@ python -m unittest
 
 Las pruebas de interfaz se ejecutan sin abrir ventanas, con Qt en modo `offscreen`.
 
+## Contribuciones
+
+Las sugerencias y mejoras son bienvenidas. Puedes abrir un *issue* para reportar un problema o proponer una idea, o enviar un *pull request* con tus cambios. Antes de enviarlo, verifica que las pruebas pasen con `python -m unittest`.
+
+## Licencia
+
+Este proyecto se distribuye bajo la [licencia MIT](LICENSE): puedes usarlo, copiarlo, modificarlo y distribuirlo libremente, también con fines comerciales, siempre que conserves el aviso de copyright.
+
 ## Autor
 
 Luis Antonio Acuña Ayala ([@AcuLuis](https://github.com/AcuLuis))
