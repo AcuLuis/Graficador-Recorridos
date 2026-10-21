@@ -43,6 +43,7 @@ class AlgorithmsService:
         visited = set()
 
         def dfs_util(node: int):
+            nonlocal content
             visited.add(node)
             for neighbor in graph.neighbors(node):
                 if neighbor not in visited:

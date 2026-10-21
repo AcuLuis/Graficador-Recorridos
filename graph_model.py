@@ -174,6 +174,27 @@ class GraphModel:
             if (u, v) not in self.edge_weights:
                 self.edge_weights[(u, v)] = self.graph.edges[u, v].get("weight", 1)
 
+        self._assign_missing_positions()
+
+    def _assign_missing_positions(self) -> None:
+        """Ubica en el lienzo (0..1) los nodos que llegaron sin posición."""
+        missing = [node for node in self.graph.nodes() if node not in self.pos]
+        if not missing:
+            return
+
+        layout = nx.spring_layout(self.graph, seed=42)
+        xs = [p[0] for p in layout.values()]
+        ys = [p[1] for p in layout.values()]
+        span_x = (max(xs) - min(xs)) or 1
+        span_y = (max(ys) - min(ys)) or 1
+
+        for node in missing:
+            x, y = layout[node]
+            self.pos[node] = (
+                0.1 + 0.8 * (x - min(xs)) / span_x,
+                0.1 + 0.8 * (y - min(ys)) / span_y,
+            )
+
     def _coerce_scalar_key(self, key: Any) -> Any:
         if isinstance(key, str):
             try:

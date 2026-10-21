@@ -2,6 +2,8 @@ import sys
 import json
 import ast
 import math
+import traceback
+from pathlib import Path
 import networkx as nx
 import matplotlib.pyplot as plt
 from PyQt6.QtCore import Qt
@@ -21,6 +23,25 @@ from algorithms_service import AlgorithmsService
 from graph_model import GraphModel
 from graph_service import GraphService
 
+DATOS_PRUEBA = Path(__file__).resolve().parent / "datos_prueba.json"
+
+
+def manejarExcepcionNoCapturada(exc_type, exc_value, exc_tb):
+    """Muestra el error en vez de cerrar la app.
+
+    Con el excepthook por defecto, PyQt6 aborta el proceso ante cualquier
+    excepción no capturada dentro de un slot.
+    """
+    traceback.print_exception(exc_type, exc_value, exc_tb)
+    if QApplication.instance() is None:
+        return
+    QMessageBox.critical(
+        None,
+        "Error inesperado",
+        f"Ocurrió un error y la operación no se completó:\n\n{exc_type.__name__}: {exc_value}",
+    )
+
+
 class Lienzo:
     def __init__(self, main_window):
         self.main_window = main_window
@@ -39,8 +60,7 @@ class Lienzo:
         self.component_nodes = set()
         self.is_panning = False
         self.pan_origin = None
-        self.current_xlim = [0, 1]
-        self.current_ylim = [0, 1]
+        self.pan_start_px = None
         self.visual_filter = 'all'
         self.historial = []
 
@@ -53,18 +73,63 @@ class Lienzo:
         self.motion_cid = self.fig.canvas.mpl_connect('motion_notify_event', self.MouseMove)
         self.release_cid = self.fig.canvas.mpl_connect('button_release_event', self.MouseRelease)
         self.scroll_cid = self.fig.canvas.mpl_connect('scroll_event', self.MouseWheel)
-        self.ax.set_xlim(*self.current_xlim)
-        self.ax.set_ylim(*self.current_ylim)
+        self.ax.set_xlim(0, 1)
+        self.ax.set_ylim(0, 1)
         self.ax.axis('off')
+
+    # Los límites se leen siempre de los ejes para que el zoom/pan de la
+    # toolbar de matplotlib y el zoom propio no se pisen entre sí.
+    @property
+    def current_xlim(self):
+        return list(self.ax.get_xlim())
+
+    @current_xlim.setter
+    def current_xlim(self, limits):
+        self.ax.set_xlim(*limits)
+
+    @property
+    def current_ylim(self):
+        return list(self.ax.get_ylim())
+
+    @current_ylim.setter
+    def current_ylim(self, limits):
+        self.ax.set_ylim(*limits)
 
     def setTipoGrafo(self, tipo):
         self.model.set_graph_type(tipo)
+        self.historial.clear()
+        self.clearAnalysisHighlights()
+        self._refresh_after_change()
+
+    def clearSelection(self):
+        self.selected_node = None
+        self.selected_edge = None
+        self.selected_nodes.clear()
+        self.selected_edges.clear()
+        self.dragging_node = None
+
+    def _prune_selection(self):
+        """Descarta de la selección los nodos/aristas que ya no existen en el grafo."""
+        graph = self.model.graph
+        if self.selected_node is not None and self.selected_node not in graph:
+            self.selected_node = None
+        if self.selected_edge is not None and not graph.has_edge(*self.selected_edge):
+            self.selected_edge = None
+        if self.dragging_node is not None and self.dragging_node not in graph:
+            self.dragging_node = None
+        self.selected_nodes = {node for node in self.selected_nodes if node in graph}
+        self.selected_edges = {edge for edge in self.selected_edges if graph.has_edge(*edge)}
+
+    def _refresh_after_change(self):
+        """Sincroniza alias del modelo, limpia selección inválida y refresca UI."""
         self.graph = self.model.graph
         self.pos = self.model.pos
         self.edge_colors = self.model.edge_colors
         self.edge_weights = self.model.edge_weights
-        self.historial.clear()
-        self.clearAnalysisHighlights()
+        self._prune_selection()
+        self.DibujarGrafo()
+        self.main_window.updateGraphStats()
+        self.main_window.updateSelectionInfo(self.selected_node, self.selected_edge)
 
     def DibujarArista(self, posNodo1, posNodo2, peso=1):
         if posNodo1 in self.graph.nodes() and posNodo2 in self.graph.nodes():
@@ -83,10 +148,10 @@ class Lienzo:
                 msg = f"El nodo {posNodo2} no se encuentra."
             self.Alertas(msg)
 
-    def Alertas(self, mensaje):
+    def Alertas(self, mensaje, titulo="Elemento no encontrado"):
         alerta = QMessageBox()
         alerta.setIcon(QMessageBox.Icon.Warning)
-        alerta.setText("Elemento no encontrado")
+        alerta.setText(titulo)
         alerta.setInformativeText(mensaje)
         alerta.setWindowTitle("Alerta")
         alerta.exec()
@@ -105,6 +170,11 @@ class Lienzo:
         if event.xdata is None or event.ydata is None:
             return
 
+        # Si la toolbar de matplotlib está en modo zoom/pan, el clic es suyo.
+        toolbar = getattr(self.main_window, 'toolbar', None)
+        if toolbar is not None and toolbar.mode != '':
+            return
+
         if event.button == 3:
             clicked_node = self._find_node_at_position(event.xdata, event.ydata)
             if clicked_node is not None:
@@ -113,17 +183,9 @@ class Lienzo:
 
         if event.button == 2:
             self.is_panning = True
-            self.pan_origin = [
-                self.current_xlim[0],
-                self.current_xlim[1],
-                self.current_ylim[0],
-                self.current_ylim[1],
-            ]
-            self.drag_start = (event.xdata, event.ydata)
-            return
-
-        # Check if the matplotlib toolbar is active (zooming or panning)
-        if hasattr(self.main_window, 'centralWidget') and self.main_window.centralWidget.toolbar.mode != '':
+            self.pan_origin = self.current_xlim + self.current_ylim
+            # Se guardan píxeles: las coordenadas de datos cambian mientras la vista se mueve.
+            self.pan_start_px = (event.x, event.y)
             return
 
         if self.main_window.dibNodoIsSelected():
@@ -207,9 +269,7 @@ class Lienzo:
     def _find_edge_at_position(self, x, y):
         threshold = 0.05
         for edge in self.graph.edges():
-            if edge not in self.pos:
-                continue
-            if len(edge) == 2 and edge[0] in self.pos and edge[1] in self.pos:
+            if edge[0] in self.pos and edge[1] in self.pos:
                 p1 = self.pos[edge[0]]
                 p2 = self.pos[edge[1]]
                 dist = self._distance_to_segment((x, y), p1, p2)
@@ -235,17 +295,14 @@ class Lienzo:
         return math.hypot(px - closest_x, py - closest_y)
 
     def MouseMove(self, event):
-        if self.is_panning and event.xdata is not None and event.ydata is not None and self.pan_origin is not None:
-            dx = event.xdata - self.drag_start[0]
-            dy = event.ydata - self.drag_start[1]
+        if self.is_panning and self.pan_origin is not None and self.pan_start_px is not None:
+            x0, x1, y0, y1 = self.pan_origin
+            bbox = self.ax.bbox
+            dx = (event.x - self.pan_start_px[0]) * (x1 - x0) / bbox.width
+            dy = (event.y - self.pan_start_px[1]) * (y1 - y0) / bbox.height
 
-            x_range = self.pan_origin[1] - self.pan_origin[0]
-            y_range = self.pan_origin[3] - self.pan_origin[2]
-
-            self.current_xlim = [self.pan_origin[0] - dx, self.pan_origin[1] - dx]
-            self.current_ylim = [self.pan_origin[2] - dy, self.pan_origin[3] - dy]
-            self.ax.set_xlim(*self.current_xlim)
-            self.ax.set_ylim(*self.current_ylim)
+            self.current_xlim = [x0 - dx, x1 - dx]
+            self.current_ylim = [y0 - dy, y1 - dy]
             self.fig.canvas.draw_idle()
             return
 
@@ -262,6 +319,7 @@ class Lienzo:
         self.drag_start = None
         self.is_panning = False
         self.pan_origin = None
+        self.pan_start_px = None
 
     def MouseWheel(self, event):
         if event.xdata is None or event.ydata is None:
@@ -311,6 +369,7 @@ class Lienzo:
         if mode != 'component':
             self.component_nodes = set()
         self.DibujarGrafo()
+        self.main_window.updateGraphStats()
 
     def focusCurrentComponent(self):
         pivot = self.selected_node
@@ -327,6 +386,7 @@ class Lienzo:
                 self.component_nodes = set(component)
                 self.visual_filter = 'component'
                 self.DibujarGrafo()
+                self.main_window.updateGraphStats()
                 return True
 
         return False
@@ -377,9 +437,10 @@ class Lienzo:
         visible_graph = self._get_visible_graph()
         edge_labels = nx.get_edge_attributes(visible_graph, 'weight')
 
+        xlim, ylim = self.current_xlim, self.current_ylim
         self.ax.clear()
-        self.ax.set_xlim(*self.current_xlim)
-        self.ax.set_ylim(*self.current_ylim)
+        self.current_xlim = xlim
+        self.current_ylim = ylim
         self.ax.axis('off')
 
         palette = ['#3498db', '#2ecc71', '#9b59b6', '#f39c12', '#e74c3c', '#1abc9c', '#34495e', '#e84393']
@@ -465,7 +526,7 @@ class Lienzo:
             font_color='#e74c3c',
         )
 
-        plt.draw()
+        self.fig.canvas.draw_idle()
 
     def GuardarIMG(self):
         file_path, _ = QFileDialog.getSaveFileName(self.main_window, 'Guardar Imagen', '', 'PNG Files (*.png);;All Files (*)')
@@ -497,17 +558,25 @@ class Lienzo:
         if not ruta:
             ruta, _ = QFileDialog.getOpenFileName(self.main_window, 'Cargar Grafo', '', 'JSON Files (*.json);;All Files (*)')
 
-        if ruta:
+        if not ruta:
+            return False
+
+        try:
             loaded_model = GraphService.load_json(ruta)
-            self.model = loaded_model
-            self.graph = self.model.graph
-            self.pos = self.model.pos
-            self.edge_colors = self.model.edge_colors
-            self.edge_weights = self.model.edge_weights
-            self.historial.clear()
-            self.clearAnalysisHighlights()
-            self.DibujarGrafo()
-            self.main_window.updateGraphStats()
+        except FileNotFoundError:
+            self.Alertas(f"No se encontró el archivo:\n{ruta}", titulo="Error al cargar")
+            return False
+        except (OSError, ValueError) as exc:
+            self.Alertas(f"No se pudo cargar el grafo.\n{exc}", titulo="Error al cargar")
+            return False
+
+        self.model = loaded_model
+        self.historial.clear()
+        self.clearAnalysisHighlights()
+        self.clearSelection()
+        self.main_window.syncTipoGrafo(self.model.graph_type)
+        self._refresh_after_change()
+        return True
 
     def setAristaColor(self, listaAristas, color):
         for edge in self.model.graph.edges():
@@ -542,59 +611,39 @@ class Lienzo:
             except ValueError:
                 pass
 
-        self.graph = self.model.graph
-        self.pos = self.model.pos
-        self.edge_colors = self.model.edge_colors
-        self.edge_weights = self.model.edge_weights
-        self.DibujarGrafo()
-        self.main_window.updateGraphStats()
+        self._refresh_after_change()
 
     def Limpiar(self):
         self.model.clear()
-        self.graph = self.model.graph
-        self.pos = self.model.pos
-        self.edge_colors = self.model.edge_colors
-        self.edge_weights = self.model.edge_weights
         self.historial.clear()
         self.clearAnalysisHighlights()
-        self.DibujarGrafo()
-        self.main_window.updateGraphStats()
+        self.clearSelection()
+        self.component_nodes = set()
+        self._refresh_after_change()
 
     def eliminarNodo(self, node_id):
         try:
             self.model.eliminar_nodo(node_id)
-            self.graph = self.model.graph
-            self.pos = self.model.pos
-            self.edge_colors = self.model.edge_colors
-            self.edge_weights = self.model.edge_weights
-            self.DibujarGrafo()
-            self.main_window.updateGraphStats()
         except ValueError as exc:
             self.Alertas(str(exc))
+            return
+        self._refresh_after_change()
 
     def eliminarArista(self, node1, node2):
         try:
             self.model.eliminar_arista(node1, node2)
-            self.graph = self.model.graph
-            self.pos = self.model.pos
-            self.edge_colors = self.model.edge_colors
-            self.edge_weights = self.model.edge_weights
-            self.DibujarGrafo()
-            self.main_window.updateGraphStats()
         except ValueError as exc:
             self.Alertas(str(exc))
+            return
+        self._refresh_after_change()
 
     def actualizarPesoArista(self, node1, node2, nuevo_peso):
         try:
             self.model.update_edge_weight(node1, node2, nuevo_peso)
-            self.graph = self.model.graph
-            self.pos = self.model.pos
-            self.edge_colors = self.model.edge_colors
-            self.edge_weights = self.model.edge_weights
-            self.DibujarGrafo()
-            self.main_window.updateGraphStats()
         except ValueError as exc:
             self.Alertas(str(exc))
+            return
+        self._refresh_after_change()
 
 
 class PanelVista(QWidget):
@@ -720,8 +769,8 @@ class PanelVista(QWidget):
         self.setLayout(main_layout)
 
         # Conexiones
-        self.rbDirigido.clicked.connect(self.setTipoGrafo)
-        self.rbNoDirigido.clicked.connect(self.setTipoGrafo)
+        # Basta con uno: los radios son exclusivos y 'toggled' solo se emite si el estado cambia.
+        self.rbDirigido.toggled.connect(self.setTipoGrafo)
         self.rbDibArista.toggled.connect(self.onRadioButtonToggled)
         self.btnDibujar.clicked.connect(self.PideNodos)
         self.btnEliminarNodo.clicked.connect(self.eliminarNodo)
@@ -735,21 +784,29 @@ class PanelVista(QWidget):
         self.btnOcultarAislados.clicked.connect(lambda: self.lienzo.setVisualFilter('hide_isolated'))
         self.btnComponenteActual.clicked.connect(self.focusComponent)
 
-    def setTipoGrafo(self):
-        if self.lienzo.graph.number_of_nodes() == 0:
-            tipo = "Dirigido" if self.rbDirigido.isChecked() else "NoDirigido"
-            self.lienzo.setTipoGrafo(tipo)
+    def setTipoGrafo(self, _checked=None):
+        tipo = "Directed" if self.rbDirigido.isChecked() else "Undirected"
+        if tipo == self.lienzo.model.graph_type:
+            return
+
+        if self.lienzo.graph.number_of_nodes() > 0:
+            if not self.lienzo.alertaConfirmacion('Se borrará tu avance. \n ¿Estás seguro de cambiar el tipo de grafo?'):
+                self.syncTipoGrafo(self.lienzo.model.graph_type)
+                return
+            self.lienzo.Limpiar()
+
+        self.lienzo.setTipoGrafo(tipo)
+
+    def syncTipoGrafo(self, tipo):
+        """Marca el radio que corresponde a 'tipo' sin disparar setTipoGrafo."""
+        for radio in (self.rbDirigido, self.rbNoDirigido):
+            radio.blockSignals(True)
+        if tipo == "Directed":
+            self.rbDirigido.setChecked(True)
         else:
-            if self.lienzo.alertaConfirmacion('Se borrará tu avance. \n ¿Estás seguro de cambiar el tipo de grafo?'):
-                tipo = "Dirigido" if self.rbDirigido.isChecked() else "NoDirigido"
-                self.lienzo.Limpiar()
-                self.lienzo.setTipoGrafo(tipo)
-            else:
-                # Revertir radio button
-                if self.rbDirigido.isChecked():
-                    self.rbNoDirigido.setChecked(True)
-                else:
-                    self.rbDirigido.setChecked(True)
+            self.rbNoDirigido.setChecked(True)
+        for radio in (self.rbDirigido, self.rbNoDirigido):
+            radio.blockSignals(False)
 
     def onRadioButtonToggled(self, state):
         if state:
@@ -818,11 +875,19 @@ class PanelVista(QWidget):
             self.lienzo.Alertas("Primero selecciona una arista en el grafo.")
             return
 
+        u, v = self.lienzo.selected_edge
+        peso_actual = self.lienzo.graph.edges[u, v].get('weight', 1)
+
         dialogo = MiDialogo(self)
         dialogo.setWindowTitle('Editar Peso de Arista')
-        dialogo.edit1.setText(str(self.lienzo.selected_edge[0]))
-        dialogo.edit2.setText(str(self.lienzo.selected_edge[1]))
-        dialogo.edit3.clear()
+        dialogo.btnGuardar.setText('Guardar Peso')
+        dialogo.entrada1.setText(str(u))
+        dialogo.entrada2.setText(str(v))
+        dialogo.entrada1.setReadOnly(True)
+        dialogo.entrada2.setReadOnly(True)
+        dialogo.entrada3.setText(str(peso_actual))
+        dialogo.entrada3.selectAll()
+        dialogo.entrada3.setFocus()
 
         if dialogo.exec() == QDialog.DialogCode.Accepted:
             try:
@@ -1190,11 +1255,8 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Z"), self).activated.connect(self.centralWidget.lienzo.Deshacer)
 
     def dibujaPruebaGrafo(self):
-        try:
-            self.centralWidget.lienzo.cargarJson("datos_prueba.json")
+        if self.centralWidget.lienzo.cargarJson(str(DATOS_PRUEBA)):
             self.centralWidget.setNombreAlgoritmo("Grafo de Prueba")
-        except FileNotFoundError:
-            QMessageBox.warning(self, "Error", "No se encontró el archivo datos_prueba.json")
 
     def solicitarInicio(self):
         if not self.centralWidget.lienzo.graph.nodes():
@@ -1264,7 +1326,7 @@ class MainWindow(QMainWindow):
             lines.append(f"{index}. Nodo {node}: {score:.3f}")
 
         self.panel.setContent("\n".join(lines))
-        self.centralWidget.lienzo.setAnalysisHighlights(scores)
+        self.centralWidget.lienzo.setAnalysisHighlights(dict(top_nodes))
         self.centralWidget.lienzo.DibujarGrafo()
         self.centralWidget.setNombreAlgoritmo("Centralidad de grado")
 
@@ -1596,20 +1658,27 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def handleSelectionDelete(self):
-        if self.centralWidget.lienzo.selected_node is not None:
-            self.centralWidget.eliminarNodo(self.centralWidget.lienzo.selected_node)
-            return
+        lienzo = self.centralWidget.lienzo
+        nodes = set(lienzo.selected_nodes)
+        if lienzo.selected_node is not None:
+            nodes.add(lienzo.selected_node)
+        edges = set(lienzo.selected_edges)
+        if lienzo.selected_edge is not None:
+            edges.add(lienzo.selected_edge)
 
-        if self.centralWidget.lienzo.selected_edge is not None:
-            self.centralWidget.lienzo.eliminarArista(
-                self.centralWidget.lienzo.selected_edge[0],
-                self.centralWidget.lienzo.selected_edge[1],
-            )
-            self.centralWidget.lienzo.selected_edge = None
-            self.updateSelectionInfo()
+        for u, v in edges:
+            if lienzo.model.graph.has_edge(u, v):
+                lienzo.model.eliminar_arista(u, v)
+        for node in nodes:
+            if node in lienzo.model.graph:
+                lienzo.model.eliminar_nodo(node)
+
+        lienzo.clearSelection()
+        lienzo._refresh_after_change()
 
 
 if __name__ == "__main__":
+    sys.excepthook = manejarExcepcionNoCapturada
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     window = MainWindow()
