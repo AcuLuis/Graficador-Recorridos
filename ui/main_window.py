@@ -12,11 +12,12 @@ from core.algorithms import AlgorithmsService
 from core.graph_stats import format_stats
 from ui.canvas import MODO_ARISTA, MODO_NODO, MODO_SELECCIONAR, Lienzo
 from ui.dialogs import DialogoArista, DialogoNodo, DialogoPosicion
+from ui import theme
 from ui.info_panel import Panel
 from ui.styles import APP_STYLESHEET
 
 DATOS_PRUEBA = Path(__file__).resolve().parent.parent / "datos_prueba.json"
-COLOR_RESULTADO = "blue"
+COLOR_RESULTADO = theme.RESULTADO
 PESO_MAXIMO = 1_000_000
 
 TIPOS_GRAFO = [("Undirected", "No dirigido"), ("Directed", "Dirigido")]
@@ -621,7 +622,10 @@ class MainWindow(QMainWindow):
         for index, (node, score) in enumerate(top_nodes, start=1):
             lines.append(f"{index}. Nodo {node}: {score:.3f}")
 
-        self.lienzo.setAnalysisHighlights(dict(top_nodes))
+        lines.append("")
+        lines.append("El tamaño de cada nodo es proporcional a su centralidad.")
+
+        self.lienzo.setAnalysisHighlights(scores)
         self.lienzo.setAristaColor([], COLOR_RESULTADO)
         self.panel.setResultado("Centralidad de grado", "\n".join(lines))
 

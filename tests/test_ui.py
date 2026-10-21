@@ -14,6 +14,7 @@ from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import QApplication, QFileDialog, QInputDialog, QMessageBox
 
 from core.graph_service import GraphService
+from ui import theme
 from ui.canvas import MODO_ARISTA, MODO_NODO, MODO_SELECCIONAR
 from ui.main_window import MainWindow
 
@@ -86,7 +87,7 @@ class UiTestCase(unittest.TestCase):
         return None
 
     def resaltadas(self):
-        return {edge for edge, color in self.lienzo.edge_colors.items() if color == "blue"}
+        return {edge for edge, color in self.lienzo.edge_colors.items() if color == theme.RESULTADO}
 
 
 class CargaTests(UiTestCase):
@@ -355,6 +356,69 @@ class VistaTests(UiTestCase):
         self.assertTrue(self.window.dock_widget.isVisible())
 
 
+class VisualTests(UiTestCase):
+    def dirigido_con_opuestas(self):
+        self.window._preguntarCambioTipo = lambda tipo: 'convertir'
+        self.window.comboTipo.setCurrentIndex(1)
+        self.lienzo.DibujarArista(2, 1, 5)  # ya existe 1 -> 2
+
+    def punto_de_curva(self, u, v):
+        """Punto medio de la arista curva u -> v, en coordenadas de datos."""
+        trazo = self.lienzo._trazo_arista_px(u, v)
+        medio = trazo[len(trazo) // 2]
+        return self.lienzo.ax.transData.inverted().transform(medio)
+
+    def test_aristas_opuestas_se_dibujan_curvas(self):
+        self.dirigido_con_opuestas()
+
+        self.assertTrue(self.lienzo._es_curva(1, 2))
+        self.assertTrue(self.lienzo._es_curva(2, 1))
+        self.assertFalse(self.lienzo._es_curva(1, 3))
+
+    def test_clic_sobre_cada_curva_selecciona_su_sentido(self):
+        self.dirigido_con_opuestas()
+
+        self.clic(*self.punto_de_curva(1, 2))
+        self.assertEqual(self.lienzo.selected_edge, (1, 2))
+
+        self.clic(*self.punto_de_curva(2, 1))
+        self.assertEqual(self.lienzo.selected_edge, (2, 1))
+
+    def test_color_de_componente_estable_al_editar_otra(self):
+        self.window.nuevoGrafo()
+        for x in (0.1, 0.2, 0.7, 0.8):
+            self.lienzo.agregarNodo(x, 0.5)
+        self.lienzo.DibujarArista(3, 4, 1)
+        color_antes = self.lienzo._color_componente(3)
+
+        self.lienzo.DibujarArista(1, 2, 1)
+
+        self.assertEqual(self.lienzo._color_componente(3), color_antes)
+
+    def test_nodo_aislado_y_texto_legible(self):
+        self.window.nuevoGrafo()
+        self.lienzo.agregarNodo(0.5, 0.5)
+
+        estilo = self.lienzo._estilo_nodo(self.lienzo.graph, 1)
+
+        self.assertEqual(estilo['relleno'], theme.NODO_AISLADO)
+        self.assertEqual(estilo['texto'], theme.texto_sobre(theme.NODO_AISLADO))
+
+    def test_arrastre_agrupa_redibujados(self):
+        original = self.lienzo.pos[1]
+        self.lienzo.MouseClick(self.evento(*original))
+        with mock.patch.object(self.lienzo, "DibujarGrafo") as dibujar:
+            for paso in range(20):
+                self.lienzo.MouseMove(self.evento(0.1 + paso * 0.01, 0.5))
+        dibujar.assert_not_called()
+        self.assertTrue(self.lienzo._timer_redibujo.isActive())
+
+        self.lienzo.MouseRelease(self.evento(0.29, 0.5))
+        self.assertFalse(self.lienzo._timer_redibujo.isActive())
+        self.assertAlmostEqual(self.lienzo.pos[1][0], 0.29)
+        self.assertAlmostEqual(self.lienzo.pos[1][1], 0.5)
+
+
 class TipoGrafoTests(UiTestCase):
     def elegir(self, indice, decision):
         self.window._preguntarCambioTipo = lambda tipo: decision
@@ -495,10 +559,16 @@ class AlgoritmosUiTests(UiTestCase):
         self.assertIn("Pasos DFS", self.window.panel.content_label.text())
         self.assertEqual(self.window.panel.algorithm_label.text(), "DFS - Profundidad")
 
-    def test_centralidad_resalta_top_5(self):
+    def test_centralidad_escala_nodos_por_puntaje(self):
         self.window.ejecutarCentralidad()
 
-        self.assertEqual(len(self.lienzo.analysis_highlighted_nodes), 5)
+        tamanos = {
+            node: self.lienzo._estilo_nodo(self.lienzo.graph, node)['tamano'] for node in self.lienzo.graph
+        }
+        # El nodo 3 tiene el mayor grado (6) y el 7 el menor (2).
+        self.assertEqual(max(tamanos, key=tamanos.get), 3)
+        self.assertEqual(min(tamanos, key=tamanos.get), 7)
+        self.assertIn("1. Nodo", self.window.panel.content_label.text())
 
     def test_dijkstra_con_destino_resalta_solo_el_camino(self):
         self.window.solicitarDestino = lambda: (True, 6)

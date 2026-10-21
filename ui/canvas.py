@@ -6,21 +6,24 @@ from typing import Any
 import networkx as nx
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from PyQt6.QtCore import QObject, Qt, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QMessageBox
 
 from core.graph_model import GraphModel
 from core.graph_service import GraphService
 from core.history import History
-
-COLOR_ARISTA = '#2c3e50'
-PALETA_COMPONENTES = ['#3498db', '#2ecc71', '#9b59b6', '#f39c12', '#e74c3c', '#1abc9c', '#34495e', '#e84393']
+from ui import theme
 
 MODO_SELECCIONAR = 'seleccionar'
 MODO_NODO = 'nodo'
 MODO_ARISTA = 'arista'
 
 TAMANO_NODO = 700
+TAMANO_NODO_DESTACADO = 950
+# Curvatura de las aristas dirigidas que tienen una opuesta (u -> v y v -> u).
+RADIO_CURVA = 0.18
+# Tiempo mínimo entre redibujados durante un arrastre (~60 fps).
+INTERVALO_REDIBUJO_MS = 16
 # Tolerancias de clic en píxeles: no dependen del nivel de zoom.
 TOLERANCIA_NODO_PX = 4
 TOLERANCIA_ARISTA_PX = 6
@@ -73,6 +76,11 @@ class Lienzo(QObject):
         self.history = History()
         # Estado previo al arrastre; se registra solo si el nodo realmente se mueve.
         self._drag_snapshot = None
+        # Durante un arrastre llegan muchos eventos; se agrupan en un redibujo.
+        self._timer_redibujo = QTimer(self)
+        self._timer_redibujo.setSingleShot(True)
+        self._timer_redibujo.setInterval(INTERVALO_REDIBUJO_MS)
+        self._timer_redibujo.timeout.connect(self.DibujarGrafo)
 
         # Documento: archivo asociado y estado guardado (para detectar cambios).
         self.ruta_actual = None
@@ -84,8 +92,8 @@ class Lienzo(QObject):
         self.canvas = FigureCanvas(self.fig)
         self.canvas.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.ax = self.fig.add_subplot()
-        self.fig.patch.set_facecolor('#f5f7fa')
-        self.ax.set_facecolor('#f5f7fa')
+        self.fig.patch.set_facecolor(theme.FONDO)
+        self.ax.set_facecolor(theme.FONDO)
         self.fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
         self.ax.set_position([0, 0, 1, 1])
         self.canvas.mpl_connect('button_press_event', self.MouseClick)
@@ -405,10 +413,34 @@ class Lienzo(QObject):
         punto = self._a_pixeles(x, y)
         mejor, mejor_distancia = None, TOLERANCIA_ARISTA_PX
         for u, v in self._get_visible_graph().edges():
-            distancia = self._distance_to_segment(punto, self._a_pixeles(*self.pos[u]), self._a_pixeles(*self.pos[v]))
+            trazo = self._trazo_arista_px(u, v)
+            distancia = min(
+                self._distance_to_segment(punto, inicio, fin) for inicio, fin in zip(trazo, trazo[1:])
+            )
             if distancia <= mejor_distancia:
                 mejor, mejor_distancia = (u, v), distancia
         return mejor
+
+    def _es_curva(self, u, v):
+        return self.graph.is_directed() and self.graph.has_edge(v, u)
+
+    def _trazo_arista_px(self, u, v, muestras=16):
+        """Puntos (en píxeles) por los que pasa la arista tal como se dibuja."""
+        p1 = self._a_pixeles(*self.pos[u])
+        p2 = self._a_pixeles(*self.pos[v])
+        if not self._es_curva(u, v):
+            return [p1, p2]
+
+        # Misma geometría que el 'arc3' de matplotlib: Bézier cuadrática cuyo
+        # punto de control se desplaza rad * (dy, -dx) desde el punto medio.
+        dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+        control = ((p1[0] + p2[0]) / 2 + RADIO_CURVA * dy, (p1[1] + p2[1]) / 2 - RADIO_CURVA * dx)
+        puntos = []
+        for i in range(muestras + 1):
+            t = i / muestras
+            a, b, c = (1 - t) ** 2, 2 * (1 - t) * t, t ** 2
+            puntos.append((a * p1[0] + b * control[0] + c * p2[0], a * p1[1] + b * control[1] + c * p2[1]))
+        return puntos
 
     def _distance_to_segment(self, point, start, end):
         px, py = point
@@ -457,7 +489,8 @@ class Lienzo(QObject):
             self._drag_snapshot = None
 
         self.model.set_node_position(self.dragging_node, (event.xdata, event.ydata))
-        self.DibujarGrafo()
+        if not self._timer_redibujo.isActive():
+            self._timer_redibujo.start()
 
     def MouseRelease(self, event):
         hubo_arrastre = self.dragging_node is not None and self._drag_snapshot is None
@@ -592,8 +625,8 @@ class Lienzo(QObject):
     # ── Dibujo ─────────────────────────────────────────────────
 
     def DibujarGrafo(self):
+        self._timer_redibujo.stop()
         visible_graph = self._get_visible_graph()
-        edge_labels = nx.get_edge_attributes(visible_graph, 'weight')
 
         xlim, ylim = self.current_xlim, self.current_ylim
         self.ax.clear()
@@ -601,98 +634,127 @@ class Lienzo(QObject):
         self.current_ylim = ylim
         self.ax.axis('off')
 
-        if visible_graph.is_directed():
-            components = nx.weakly_connected_components(visible_graph)
-        else:
-            components = nx.connected_components(visible_graph)
+        if visible_graph.number_of_nodes() == 0:
+            self.canvas.draw_idle()
+            return
 
-        component_colors = {}
-        for index, component in enumerate(components):
-            color = PALETA_COMPONENTES[index % len(PALETA_COMPONENTES)]
-            for node in component:
-                component_colors[node] = color
-
-        node_colors = []
-        node_sizes = []
-        node_edgecolors = []
-        node_linewidths = []
-        for node in visible_graph.nodes():
-            if node == self.origen_arista:
-                node_colors.append('#16a34a')
-                node_sizes.append(1000)
-                node_edgecolors.append('#14532d')
-                node_linewidths.append(3)
-            elif node in self.selected_nodes or node == self.selected_node:
-                node_colors.append('#e67e22')
-                node_sizes.append(1000)
-                node_edgecolors.append('#d35400')
-                node_linewidths.append(2)
-            elif visible_graph.degree(node) == 0:
-                node_colors.append('#f39c12')
-                node_sizes.append(900)
-                node_edgecolors.append('#d68910')
-                node_linewidths.append(2)
-            elif node in self.analysis_highlighted_nodes:
-                node_colors.append(component_colors.get(node, '#3498db'))
-                node_sizes.append(900)
-                node_edgecolors.append('#8e44ad')
-                node_linewidths.append(2)
-            else:
-                node_colors.append(component_colors.get(node, '#3498db'))
-                node_sizes.append(TAMANO_NODO)
-                node_edgecolors.append('#2980b9')
-                node_linewidths.append(2)
-
-        edge_colors_draw = []
-        edge_widths = []
-        for edge in visible_graph.edges():
-            selected = edge in self.selected_edges or (
-                self.selected_edge is not None and (
-                    edge == self.selected_edge or edge == (self.selected_edge[1], self.selected_edge[0])
-                )
-            )
-            edge_colors_draw.append('#e67e22' if selected else self.edge_colors.get(edge, COLOR_ARISTA))
-            edge_widths.append(4.0 if selected else 2.5)
+        nodos = list(visible_graph.nodes())
+        estilos = {node: self._estilo_nodo(visible_graph, node) for node in nodos}
+        tamanos = [estilos[node]['tamano'] for node in nodos]
 
         nx.draw_networkx_nodes(
             visible_graph,
             pos=self.pos,
-            node_color=node_colors,
-            node_size=node_sizes,
-            edgecolors=node_edgecolors,
-            linewidths=node_linewidths,
+            nodelist=nodos,
+            node_color=[estilos[node]['relleno'] for node in nodos],
+            node_size=tamanos,
+            edgecolors=[estilos[node]['borde'] for node in nodos],
+            linewidths=[estilos[node]['grosor'] for node in nodos],
             ax=self.ax,
         )
+        self._dibujarAristas(visible_graph, nodos, tamanos)
 
-        nx.draw_networkx_edges(
-            visible_graph,
-            pos=self.pos,
-            ax=self.ax,
-            edge_color=edge_colors_draw,
-            width=edge_widths,
-            arrows=visible_graph.is_directed(),
-        )
-
-        nx.draw_networkx_labels(
-            visible_graph,
-            pos=self.pos,
-            labels={node: str(node) for node in visible_graph.nodes()},
-            font_size=11,
-            font_color='white',
-            font_weight='bold',
-            ax=self.ax,
-        )
-
-        nx.draw_networkx_edge_labels(
-            visible_graph,
-            pos=self.pos,
-            edge_labels=edge_labels,
-            ax=self.ax,
-            font_size=10,
-            font_color='#e74c3c',
-        )
+        # Las etiquetas se agrupan por color de texto (claro u oscuro según el relleno).
+        for color_texto in {estilo['texto'] for estilo in estilos.values()}:
+            nx.draw_networkx_labels(
+                visible_graph,
+                pos=self.pos,
+                labels={node: str(node) for node in nodos if estilos[node]['texto'] == color_texto},
+                font_size=11,
+                font_color=color_texto,
+                font_weight='bold',
+                ax=self.ax,
+            )
 
         self.canvas.draw_idle()
+
+    def _estilo_nodo(self, graph, node):
+        estilo = {
+            'relleno': self._color_componente(node),
+            'borde': '#ffffff',
+            'grosor': 1.5,
+            'tamano': TAMANO_NODO,
+        }
+
+        if node in self.analysis_highlighted_nodes:
+            # Tamaño proporcional al puntaje del análisis (p. ej. centralidad).
+            maximo = max(self.analysis_highlighted_nodes.values()) or 1
+            proporcion = self.analysis_highlighted_nodes[node] / maximo
+            estilo['tamano'] = 450 + 1100 * proporcion
+        elif graph.degree(node) == 0:
+            estilo['relleno'] = theme.NODO_AISLADO
+
+        if node == self.origen_arista:
+            estilo.update(relleno=theme.NODO_ORIGEN_ARISTA, borde=theme.BORDE_ORIGEN_ARISTA, grosor=3,
+                          tamano=max(estilo['tamano'], TAMANO_NODO_DESTACADO))
+        elif node in self.selected_nodes or node == self.selected_node:
+            estilo.update(relleno=theme.NODO_SELECCIONADO, borde=theme.BORDE_SELECCIONADO, grosor=3,
+                          tamano=max(estilo['tamano'], TAMANO_NODO_DESTACADO))
+
+        estilo['texto'] = theme.texto_sobre(estilo['relleno'])
+        return estilo
+
+    def _color_componente(self, node):
+        grafo = self.graph.to_undirected(as_view=True) if self.graph.is_directed() else self.graph
+        return theme.color_componente(min(nx.node_connected_component(grafo, node)))
+
+    def _arista_seleccionada(self, u, v):
+        if (u, v) in self.selected_edges or self.selected_edge == (u, v):
+            return True
+        if self.graph.is_directed():
+            return False
+        return (v, u) in self.selected_edges or self.selected_edge == (v, u)
+
+    def _estilo_arista(self, u, v):
+        if self._arista_seleccionada(u, v):
+            return {'color': theme.ARISTA_SELECCIONADA, 'ancho': 4.5}
+        color = self.edge_colors.get((u, v))
+        if color is not None:
+            return {'color': color, 'ancho': 4.5}
+        return {'color': theme.ARISTA, 'ancho': 2.2}
+
+    def _dibujarAristas(self, graph, nodos, tamanos):
+        rectas = [edge for edge in graph.edges() if not self._es_curva(*edge)]
+        curvas = [edge for edge in graph.edges() if self._es_curva(*edge)]
+        dirigido = graph.is_directed()
+
+        for aristas, conexion in ((rectas, 'arc3'), (curvas, f'arc3,rad={RADIO_CURVA}')):
+            if not aristas:
+                continue
+            estilos = [self._estilo_arista(u, v) for u, v in aristas]
+            # Flechas y curvas solo aplican a dirigidos; en no dirigidos networkx
+            # usa líneas simples y avisa si recibe estos parámetros.
+            extra_flechas = dict(
+                arrowstyle='-|>',
+                arrowsize=18,
+                connectionstyle=conexion,
+                # Con el tamaño real de cada nodo, la flecha termina en su borde.
+                nodelist=nodos,
+                node_size=tamanos,
+            ) if dirigido else {}
+            nx.draw_networkx_edges(
+                graph,
+                pos=self.pos,
+                edgelist=aristas,
+                edge_color=[estilo['color'] for estilo in estilos],
+                width=[estilo['ancho'] for estilo in estilos],
+                arrows=dirigido,
+                ax=self.ax,
+                **extra_flechas,
+            )
+            nx.draw_networkx_edge_labels(
+                graph,
+                pos=self.pos,
+                edge_labels={(u, v): f"{graph.edges[u, v].get('weight', 1):g}" for u, v in aristas},
+                font_size=9,
+                font_color=theme.ETIQUETA_PESO,
+                rotate=False,
+                bbox=dict(boxstyle='round,pad=0.25', facecolor='white', edgecolor=theme.BORDE_ETIQUETA, linewidth=0.8),
+                connectionstyle=conexion,
+                nodelist=nodos,
+                node_size=tamanos,
+                ax=self.ax,
+            )
 
     def exportarImagen(self, ruta, resumen):
         title = self.fig.suptitle('Visualizador de Grafos - ADA', fontsize=14, fontweight='bold', y=0.98)
@@ -706,7 +768,7 @@ class Lienzo(QObject):
             bbox=dict(boxstyle='round,pad=0.4', facecolor='#ffffff', edgecolor='#cbd5e1', alpha=0.9),
         )
         try:
-            self.fig.savefig(ruta, bbox_inches='tight', pad_inches=0.25, facecolor='#f5f7fa')
+            self.fig.savefig(ruta, bbox_inches='tight', pad_inches=0.25, facecolor=theme.FONDO)
         finally:
             title.remove()
             summary_text.remove()

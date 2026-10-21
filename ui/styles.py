@@ -123,7 +123,7 @@ QLineEdit:focus {
 
 /* ── Panel lateral (dock) ── */
 QDockWidget {
-    color: #1f2937;
+    color: #ffffff;
     font-size: 13px;
 }
 QDockWidget::title {
